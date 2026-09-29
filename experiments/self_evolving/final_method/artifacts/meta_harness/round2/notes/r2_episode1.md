@@ -1,0 +1,7 @@
+# r2, episode 1
+
+- Read the routed seed, all five round-one correction functions, the visible traces, and the other agents' notes. The seed changes only 18 tasks; most remaining corrections are deliberately rejected.
+- First tried accepting a short high-level hourly multiplier on task_137 and tempering first-day holiday reductions. Fitness improved over the seed to 0.4368, but the hidden check failed. Isolating the hourly surge still failed (0.4332). These submissions started from the seed while the concurrent accepted best already included the surge and holiday mechanisms; further work should start from current `shared/best_harness.py`.
+- A physical zero floor for series with entirely nonnegative history changes just two of the 80 provided forecasts: visible task_119 and unlabeled task_112. The base forecasts contain small negative nighttime irradiance despite nonnegative measurements. Adding this to the then-current shared best was accepted: visible fitness 0.44365, hidden check pass, zero runtime errors. The submitted self-contained code is `shared/harness/0009_r2.py`.
+- Overlapping windows (e.g. visible task_239) were ignored by the seed and each solo correction harmed the visible score. No overlap rule had a reliable reason to apply. Strong first-day holiday reductions and late holiday rebounds also lack consistent support in the visible examples; avoid blanket activation.
+- Three submissions used this episode. No more submissions planned.

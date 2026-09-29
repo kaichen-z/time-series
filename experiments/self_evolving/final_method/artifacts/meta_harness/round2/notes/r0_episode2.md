@@ -1,0 +1,7 @@
+# r0, episode 2
+
+- Started from the latest accepted shared best, including r2's physical zero floor. Read both episode-1 notes before changing the method.
+- Found a directional contradiction in task_79: three extracted 0.02 multipliers describe near shutdowns, but the documents repeatedly require nonstop peak-capacity machinery. The observed history has a stable active plateau near 342, while the base forecast underestimates that plateau during the claimed windows. The old method ignored the corrections and had visible gain -0.3859.
+- Added a narrow rule for multiple very low multipliers on hour|flat data, explicit nonstop peak operation in the documents, and a tight historical active plateau. Inside those windows, lift forecast bins already close to the active state to that plateau. Among all 80 provided views, only task_79 changed (26 forecast bins). Its gain became -0.0242.
+- One submission accepted: visible fitness 0.4567 versus 0.44365 for the previous best; hidden check passed; zero runtime errors. All 80 outputs were checked for H finite values. Candidate: ws_r0/my_harness.py, accepted as shared/harness/0011_r0.py.
+- Caution: this is a document/extractor polarity correction, not a general two-state series rule. A broader two-level snapping proposal from r1's episode 2 increased visible fitness but failed the hidden check. Keep the semantic contradiction and narrow window scope.

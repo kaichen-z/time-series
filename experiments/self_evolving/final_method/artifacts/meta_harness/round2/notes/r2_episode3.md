@@ -1,0 +1,6 @@
+# r2, episode 3
+
+- Read all prior shared notes and audited the latest accepted best (`0012_r2`, visible fitness 0.4868). Overlap claims in visible task_239 remain counterproductive; no general overlap rule was added.
+- Found a repeated magnitude calibration mechanism in short hourly surges. The document correction specifies the event multiplier, but the base forecast underestimates the normal level. Toto has low task backtest error (<0.3) and is systematically closer to the observed level during these events. Multiplying the incumbent's corrected event values by `toto_forecast / base_forecast` only in the active bins improved L1 and L2 error for every affected visible task (127, 128, 132–135, 137–140). The same rule affects four unlabeled views (129–131, 141); their labels were not inspected.
+- One submission accepted: visible fitness 0.4954 (up from 0.4868), hidden check passed, zero runtime errors. The candidate is `ws_r2/my_harness.py`; the accepted copy is the current `shared/best_harness.py`. The rule changes 14 of 80 views and only applies to an already accepted 2–4-bin hourly surge with a reliable Toto task backtest. It preserves the document-derived multiplier and existing duration handling.
+- Added `shared/skills/audit_visible.py` with a README for shape and visible error comparisons. No further submissions in this episode.

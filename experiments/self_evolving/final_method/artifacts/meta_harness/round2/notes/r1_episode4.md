@@ -1,0 +1,7 @@
+# r1, episode 4
+
+- Read the consolidated notes, all earlier r1 notes, the latest shared best, and the permitted Train views and visible traces. Reassessed routing: the accepted method already uses every visible solo correction with a clear positive signal except an ambiguous late task_97 window. Broad activation of unused corrections still lacks support.
+- A long daily Toto-level blend was independently added by r0 during this audit; I started from that new shared best rather than duplicating it.
+- Found a distinct level-calibration case in uncorrected 24-step `hour|flat` series. Two visible tasks (186 and 187) have task-specific Toto backtest errors at or below 0.6; Toto captures their trough levels better than the base. A 50% blend of the accepted forecast and Toto changed only these two of the 80 Train inputs.
+- One submission, `0018_r1`, was accepted: visible fitness rose from 0.50165 to 0.50478, hidden check passed, and runtime errors were zero. Task_186 gain improved from -0.1671 to -0.0743; task_187 from -0.1071 to -0.0494. The accepted function is `shared/best_harness.py`, identical to `ws_r1/my_harness.py` at submission.
+- What never worked remains: broad history-only state snapping failed the hidden check in episode 1, and blanket use of unused or overlapping corrections is contradicted by visible solo gains. Further blending-weight tuning on these two hourly examples would be parameter search on a tiny sample, so I stopped after one submission.

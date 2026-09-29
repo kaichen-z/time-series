@@ -1,5 +1,6 @@
 """Self-contained document correction router."""
 import re
+from collections import Counter
 _SOURCES = {
     'single': '"""Document adjustment with a wider bound for isolated short surge events."""\nimport math\n\nW = {"absmag": 3.249138, "conf": -0.073746, "wfrac": 0.62751,\n     "docbase": -2.770991, "ratio": -0.006965, "trust": 1.01701,\n     "bias": -2.746616}\n\n\ndef accept(f):\n    z = sum(W[k] * f[k] for k in W)\n    z = max(-30.0, min(30.0, z))\n    p = 1 / (1 + math.exp(-z))\n    return 1.0 if p > 0.6 else (0.5 if p > 0.35 else 0.0)\n\n\ndef adjust(view):\n    base = list(view["base_forecast"])\n    H = view["H"]\n    out = list(base)\n    corrections = view["corrections"]\n    for c in corrections:\n        s, e, m = c["start"], c["end"], c["multiplier"]\n        f = {"absmag": abs(m - 1), "conf": view["doc_confidence"],\n             "wfrac": (e - s) / H, "docbase": view["docbase"],\n             "ratio": min(5.0, abs(m - 1) / view["sigma_main_calib"]),\n             "trust": min(3.0, view["cell_toto_backtest_error"]),\n             "bias": 1.0}\n        a = accept(f)\n        if a <= 0:\n            continue\n        # A single, short, plausible surge has a different risk profile from\n        # a sustained trend or one of several overlapping event claims.\n        lower = -1.0 if (len(corrections) == 1 and m == 0 and\n                          e - s <= H / 2 and view["cell"].startswith("day")) else -0.5\n        if lower == -1.0:\n            a = 1.0\n        short_hour_surge = (len(corrections) == 1 and\n                            2 <= m <= 6 and\n                            e - s <= H / 2 and\n                            view["cell"].startswith("hour"))\n        upper = m - 1 if short_hour_surge else 0.5\n        mm = 1 + max(lower, min(upper, a * (m - 1)))\n        # A short upward event ends at the restoration point included by the\n        # extractor. This applies even when the event has companion claims.\n        surge_boundary = m >= 1.5 and e - s <= H / 2 and view["cell"].startswith("hour")\n        for i in range(max(0, s), min(e - 1 if (lower == -1.0 or surge_boundary) else e, H)):\n            out[i] = base[i] * mm\n    return [float(x) if math.isfinite(x) else float(b)\n            for x, b in zip(out, base)]\n',
     'indep1': '"""Document-aware correction of a base forecast."""\nimport math\nimport re\n\nW = {"absmag": 3.249138, "conf": -0.073746, "wfrac": 0.62751,\n     "docbase": -2.770991, "ratio": -0.006965, "trust": 1.01701,\n     "bias": -2.746616}\n\n\ndef accept(f):\n    z = sum(W[k] * f[k] for k in W)\n    z = max(-30.0, min(30.0, z))\n    p = 1 / (1 + math.exp(-z))\n    return 1.0 if p > 0.6 else (0.5 if p > 0.35 else 0.0)\n\n\ndef adjust(view):\n    base = list(view["base_forecast"])\n    H = view["H"]\n    out = list(base)\n    caps = [0.5] * H\n    down_caps = [0.5] * H\n    first_doc = (view.get("documents") or [""])[0].lower()\n    event_docs = " ".join((view.get("documents") or [])[:4]).lower()\n    stated_hours = None\n    if re.search(r"\\b(?:three|3)[ -]hour\\b|\\b180[ -]minutes?\\b", event_docs):\n        stated_hours = 3\n    elif re.search(r"\\b(?:two|2)[ -]hour\\b|\\b120[ -]minutes?\\b", event_docs):\n        stated_hours = 2\n    elif re.search(r"\\b(?:one|1)[ -]hour\\b|\\b(?:sixty|60)(?: \\(60\\))?[ -]minutes?\\b", event_docs):\n        stated_hours = 1\n    calendar_notice = "holiday" in first_doc or "public observance" in first_doc\n    holiday_policy = (calendar_notice and H == 72 and "hour" in view["freq"]\n                      and any(w in first_doc for w in ("official", "policy", "administrative")))\n    for c in view["corrections"]:\n        s, e, m = c["start"], c["end"], c["multiplier"]\n        post_holiday_rebound = holiday_policy and m > 1.0 and s >= 24\n        if holiday_policy and m > 1.0 and not post_holiday_rebound:\n            continue\n        f = {"absmag": abs(m - 1), "conf": view["doc_confidence"],\n             "wfrac": (e - s) / H, "docbase": view["docbase"],\n             "ratio": min(5.0, abs(m - 1) / view["sigma_main_calib"]),\n             "trust": min(3.0, view["cell_toto_backtest_error"]), "bias": 1.0}\n        a = accept(f)\n        short_spike = (1.5 <= m <= 10.0 and (e-s)/H <= 0.18 and not calendar_notice)\n        if short_spike:\n            a = 1.0\n        if post_holiday_rebound:\n            a = 1.0\n            m = min(1.2, m)\n        first_holiday_dip = holiday_policy and m < 1.0 and s < 24 and e <= 24\n        if first_holiday_dip:\n            a = 1.0\n            m = max(0.9 if e - s < 24 else 0.8, m)\n        if a <= 0:\n            continue\n        mm = 1 + a * (m - 1)\n        # An end timestamp is sometimes extracted as an affected hour. The\n        # stated event duration gives the number of affected hourly bins.\n        apply_end = e - 1 if (short_spike and "hour" in view["freq"]\n                              and stated_hours is not None\n                              and e - s == stated_hours + 1) else e\n        for i in range(max(0, s), min(apply_end, H)):\n            out[i] = base[i] * mm\n            if short_spike:\n                caps[i] = 3.5 if m >= 4.0 and e-s >= 3 else 1.5\n    # An explicitly dated four-day shutdown sometimes arrives as a five-step\n    # zero correction: the end timestamp is the reopening day, not a fifth\n    # closed day. Respect the stated duration and let that day rebound.\n    early_docs = " ".join((view.get("documents") or [])[:7]).lower()\n    four_day_shutdown = ("four-day" in early_docs or "ninety-six hours" in early_docs\n                         or "96-hour" in early_docs or "4-day" in early_docs)\n    if "day" in view["freq"] and four_day_shutdown:\n        for c in view["corrections"]:\n            s, e = c["start"], c["end"]\n            if c["multiplier"] == 0 and e - s == 5 and 0 <= s < H:\n                for i in range(s, min(s + 4, H)):\n                    out[i] = 0.0\n                    down_caps[i] = 1.0\n                if e - 1 < H:\n                    out[e - 1] = base[e - 1]\n    # A recurring maintenance shutdown can teach the base model false zeros.\n    # If documents indicate maintenance is changing, use the adjacent\n    # operational level to fill only hours that were consistently zero.\n    if (H == 24 and view.get("cell") == "hour|seas"\n            and "maintenance" in first_doc and len(view["history"]) >= 72):\n        hist = view["history"]\n        for c in view["corrections"]:\n            s, e, m = c["start"], c["end"], c["multiplier"]\n            if not (m > 1.2 and 0 < s < e < H and e - s <= 12):\n                continue\n            zeros = []\n            for i in range(s, e):\n                past = hist[i::24]\n                zeros.append(sum(abs(x) < 0.05 for x in past) >= 0.8 * len(past))\n            if sum(zeros) < 0.65 * (e - s):\n                continue\n            post = max(0.0, base[e])\n            pre = max(0.0, base[s - 1])\n            if post <= 0:\n                continue\n            start_level = min(max(pre, post), 1.5 * post)\n            for i in range(s, e):\n                out[i] = base[i]\n                caps[i] = 0.5\n                if zeros[i - s]:\n                    level = start_level + (post - start_level) * (i - s) / max(1, e - s - 1)\n                    out[i] = max(base[i], level)\n                    caps[i] = max(caps[i], (out[i] - base[i]) / max(abs(base[i]), 1e-12))\n    # If an irradiance forecast collapses despite a recent daylight cycle,\n    # use a tempered persistence estimate for the next day\'s daylight.\n    docs_head = " ".join((view.get("documents") or [])[:3]).lower()\n    if (H == 24 and len(view["history"]) >= 48 and "hour" in view["freq"]\n            and ("solar" in docs_head or "sky" in docs_head or "sun" in docs_head)\n            and max(view["history"][-24:]) > 100\n            and max(base) < 0.05 * max(view["history"][-24:])):\n        prev = view["history"][-24:]\n        return [float(max(0.0, 0.3 * b + 0.7 * p)) for b, p in zip(base, prev)]\n    if (H == 24 and len(view["history"]) >= 48 and "hour" in view["freq"]\n            and ("solar" in docs_head or "sky" in docs_head or "sun" in docs_head)\n            and max(view["history"][-24:]) > 100\n            and max(base) < 0.5 * max(view["history"][-24:])):\n        prev = view["history"][-24:]\n        return [float(max(0.0, 0.75 * b + 0.25 * p)) for b, p in zip(base, prev)]\n    return [b + max(-down * abs(b), min(cap * abs(b), o - b))\n            for b, o, cap, down in zip(base, out, caps, down_caps)]\n',
@@ -47,154 +48,17 @@ def adjust(view):
                 and 0.8 <= first["multiplier"] <= 0.9
                 and "holiday" in head and "official" in head):
             return _load("indep1")(view)
-    return _load(ROUTE.get(cell, "shared3"))(view)
-
-_routed_adjust = adjust
-def adjust(view):
-    out = _routed_adjust(view)
-    if view["cell"] == "hour|seas" and view["H"] == 72:
-        docs = " ".join((view.get("documents") or [])[:3]).lower()
-        if "holiday" in docs:
-            for c in view["corrections"]:
-                s, e, m = c["start"], c["end"], c["multiplier"]
-                if 0.7 <= m <= 0.9 and 0 <= s < e <= 24 and e-s < 24:
-                    for i in range(s, e):
-                        out[i] = view["base_forecast"][i] * m
-    return out
-
-_previous_adjust = adjust
-def adjust(view):
-    out = _previous_adjust(view)
-    if view["history"] and min(view["history"]) >= 0:
-        return [max(0.0, float(x)) for x in out]
-    return out
-
-_before_direction_check = adjust
-def adjust(view):
-    out = _before_direction_check(view)
-    cs = view['corrections']
-    if (view['cell'] == 'hour|flat' and len(cs) >= 2
-            and all(0 < c['multiplier'] <= 0.05 and 4 <= c['end'] - c['start'] <= 16 for c in cs)):
-        docs = ' '.join(view.get('documents') or []).lower()
-        positive_operation = ('non-stop' in docs and 'peak capacity' in docs
-                              and ('increase' in docs or 'maximum output' in docs))
-        hist = view['history']
-        if positive_operation and len(hist) >= 48:
-            values = sorted(x for x in hist if x > 0)
-            if values:
-                active = values[int(0.90 * (len(values) - 1))]
-                near = [x for x in values if 0.95 * active <= x <= 1.05 * active]
-                base = view['base_forecast']
-                if (active > 0 and len(near) >= 8
-                        and max(near) - min(near) <= 0.05 * active):
-                    plateau = sum(near) / len(near)
-                    for c in cs:
-                        for i in range(max(0,c['start']),min(view['H'],c['end'])):
-                            if base[i] >= 0.5 * plateau:
-                                out[i] = max(out[i],plateau)
-    return out
-
-# Reconcile a short extracted surge with repeated, direct load measurements.
-# The extractor may capture a weaker preliminary estimate even when the
-# operational reports later quantify the actual electrical demand.
-_fourfold_previous_adjust = adjust
-
-def adjust(view):
-    out = _fourfold_previous_adjust(view)
-    cs = view.get("corrections") or []
-    if (view.get("H") != 24 or not view.get("cell", "").startswith("hour|")
-            or len(cs) != 1):
-        return out
-    c = cs[0]
-    s, e, m = c["start"], c["end"], c["multiplier"]
-    if not (0 <= s < e <= 24 and 1.5 <= m < 4.0 and 2 <= e-s <= 3):
-        return out
-    magnitude = re.compile(r"\b(?:fourfold|four times|4x|quadrupl\w*)\b", re.I)
-    quantity = re.compile(r"\b(?:load|demand|consumption|power|watt\w*|usage)\b", re.I)
-    reports = 0
-    for doc in (view.get("documents") or [])[:12]:
-        if any(quantity.search(doc[max(0, hit.start()-120):hit.end()+120])
-               for hit in magnitude.finditer(doc)):
-            reports += 1
-    if reports < 2:
-        return out
-    base = view["base_forecast"]
-    for i in range(s, e - 1):
-        out[i] = float(base[i] * 4.0)
-    return out
-
-# A short, well specified event changes the event multiplier, while the
-# underlying level can still be estimated from the independent Toto forecast.
-# Use its level only where the existing method already applies a surge and
-# where its task backtest error indicates a reliable short-range baseline.
-_pre_level_adjust = adjust
-
-def adjust(view):
-    out = _pre_level_adjust(view)
-    cs = view.get('corrections') or []
-    if (view.get('H') != 24 or not view.get('cell', '').startswith('hour|')
-            or len(cs) != 1 or view.get('task_toto_backtest_error', 1e9) >= 0.3):
-        return out
-    c = cs[0]
-    s, e, m = c['start'], c['end'], c['multiplier']
-    if not (0 <= s < e <= 24 and 1.5 <= m <= 6 and 2 <= e-s <= 4):
-        return out
-    base, toto = view['base_forecast'], view['toto_forecast']
-    for i in range(s, e - 1):
-        if (base[i] > 0 and toto[i] > 0 and out[i] > base[i]
-                and 0.8 <= toto[i] / base[i] <= 1.25):
-            out[i] *= toto[i] / base[i]
-    return out
-
-# The radiation instruments have a physical zero at night.  A forecast model
-# sometimes turns that repeated zero into a small positive value.
-_before_solar_night = adjust
-
-def adjust(view):
-    out = _before_solar_night(view)
-    if (view.get('H') != 24 or not view.get('cell', '').startswith('hour|')
-            or len(view.get('history') or []) < 48):
-        return out
-    docs = ' '.join((view.get('documents') or [])[:5]).lower()
-    if not any(word in docs for word in ('solar irradiance', 'solar radiat',
-                                         'sunlight', 'solar flux')):
-        return out
-    hist = view['history']
-    days = min(7, len(hist) // 24)
-    zero_hours = [i for i in range(24)
-                  if all(abs(hist[-24*k+i]) < 1e-9 for k in range(1, days+1))]
-    if len(zero_hours) < 6:
-        return out
-    for i in zero_hours:
-        out[i] = 0.0
-    return out
-
-# Long daily projections can drift in level even when the document extractor
-# yields no trustworthy active change. Blend two independently trained levels
-# only if Toto's task-specific historical backtest is strong.
-_before_long_daily_blend = adjust
-def adjust(view):
-    out = _before_long_daily_blend(view)
-    base = view['base_forecast']
-    error = view.get('task_toto_backtest_error')
-    if error is None:
-        error = view.get('cell_toto_backtest_error')
-    if (view.get('cell') == 'day|seas' and view['H'] >= 100
-            and error is not None and error <= 0.2
-            and all(abs(a-b) < 1e-9 for a,b in zip(out,base))):
-        return [float(0.5*a + 0.5*b) for a,b in zip(out,view['toto_forecast'])]
-    return out
-
-# For short hourly series without an extracted event, use some of an
-# independently trained level when its task-specific backtest is reliable.
-_before_short_hour_blend = adjust
-
-def adjust(view):
-    out = _before_short_hour_blend(view)
-    error = view.get('task_toto_backtest_error')
-    if (view.get('cell') == 'hour|flat' and view.get('H') == 24
-            and not view.get('corrections') and error is not None
-            and 0 <= error <= 0.6):
-        toto = view['toto_forecast']
-        return [float(0.5 * a + 0.5 * b) for a, b in zip(out, toto)]
-    return out
+    routed = _load(ROUTE.get(cell, "shared3"))(view)
+    # A near-binary operating series should not be forecast at fractional
+    # levels created by a smooth statistical model.
+    hist = view.get("history") or []
+    if len(hist) >= 100 and view["H"] >= 48:
+        tail = hist[-120:]
+        counts = Counter(round(x, 3) for x in tail)
+        modes = counts.most_common(2)
+        if len(modes) == 2 and sum(n for _, n in modes) >= 0.9 * len(tail):
+            lo, hi = sorted((modes[0][0], modes[1][0]))
+            if lo >= 0 and hi - lo >= 20 * max(1e-9, view["sigma_main_calib"]):
+                middle = (lo + hi) / 2
+                return [float(lo if x <= middle else hi) for x in routed]
+    return routed

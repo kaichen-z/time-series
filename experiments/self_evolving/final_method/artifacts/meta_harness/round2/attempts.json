@@ -1,0 +1,192 @@
+[
+ {
+  "attempt": 0,
+  "agent": "seed",
+  "visible_fitness": 0.4288635787464382,
+  "hidden_check": null,
+  "accepted": true,
+  "note": null,
+  "harness": "harness/0000_seed.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 1,
+  "agent": "r1",
+  "visible_fitness": 0.43861887526754906,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Route explicit one/two-hour events by documented duration; allow full one-hour surge multiplier",
+  "harness": "harness/0001_r1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 2,
+  "agent": "r0",
+  "visible_fitness": 0.4373782134719614,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Apply short documented thermal surges and moderate first-day holiday dips missed by routed acceptance gate",
+  "harness": "harness/0002_r0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 3,
+  "agent": "r1",
+  "visible_fitness": 0.4409457070109691,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Add documented first-day holiday reduction for modest 0.8-0.9 multipliers",
+  "harness": "harness/0003_r1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 4,
+  "agent": "r2",
+  "visible_fitness": 0.4367600439966327,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Apply high-level short hourly surges rejected by validator; temper first-day holiday closures",
+  "harness": "harness/0004_r2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 5,
+  "agent": "r0",
+  "visible_fitness": 0.4373782134719614,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Apply documented short thermal spike; allow moderate early holiday dips only where base has not already fallen well below recent levels",
+  "harness": "harness/0005_r0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 6,
+  "agent": "r2",
+  "visible_fitness": 0.4331666554638837,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Apply only short high-level hourly surge when routed seed ignores it",
+  "harness": "harness/0006_r2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 7,
+  "agent": "r1",
+  "visible_fitness": 0.4416622599678399,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Bridge repeated maintenance zeros when documents indicate active operation and adjacent levels are positive",
+  "harness": "harness/0007_r1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 8,
+  "agent": "r0",
+  "visible_fitness": 0.44354698623249755,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Extend accepted duration and first-day holiday routing with short early holiday dips that the base has not modeled",
+  "harness": "harness/0008_r0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 9,
+  "agent": "r2",
+  "visible_fitness": 0.44365335004795203,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Floor forecast at zero for histories that are nonnegative; removes artificial negative nighttime irradiance",
+  "harness": "harness/0009_r2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 10,
+  "agent": "r1",
+  "visible_fitness": 0.4523912594144298,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Snap exceptionally stable two-level operating histories to observed states",
+  "harness": "harness/0010_r1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 11,
+  "agent": "r0",
+  "visible_fitness": 0.4566960585388601,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Correct extractor direction when documents specify nonstop peak operation and history has a stable high state",
+  "harness": "harness/0011_r0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 12,
+  "agent": "r2",
+  "visible_fitness": 0.4867762529783812,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Use repeated direct fourfold electrical-load reports to correct understated short hourly surge multipliers",
+  "harness": "harness/0012_r2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 13,
+  "agent": "r2",
+  "visible_fitness": 0.4953685657177901,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Scale documented short hourly surges from reliable Toto baseline levels",
+  "harness": "harness/0013_r2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 14,
+  "agent": "r2",
+  "visible_fitness": 0.4991524673473259,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Zero repeated nighttime bins for solar radiation series",
+  "harness": "harness/0014_r2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 15,
+  "agent": "r0",
+  "visible_fitness": 0.49606038212341763,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Blend reliable independent Toto levels only where accepted document adjustment is inactive",
+  "harness": "harness/0015_r0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 16,
+  "agent": "r0",
+  "visible_fitness": 0.49997656482338004,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Blend low-backtest Toto levels on unchanged long seasonal daily horizons",
+  "harness": "harness/0016_r0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 17,
+  "agent": "r0",
+  "visible_fitness": 0.5016478998427701,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Use low cell Toto backtest when task backtest is unavailable for long daily level blend",
+  "harness": "harness/0017_r0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 18,
+  "agent": "r1",
+  "visible_fitness": 0.5047835650266634,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Blend reliable Toto levels on uncorrected short hourly flat series",
+  "harness": "harness/0018_r1.py",
+  "n_runtime_errors": 0
+ }
+]

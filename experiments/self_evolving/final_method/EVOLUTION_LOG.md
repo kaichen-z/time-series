@@ -124,7 +124,9 @@ Code evolution (visible fitness of the seed function 0.1948):
 | Independent 2 | 12 | 8 | 0.264 | 0.370 |
 | Independent 3 | 7 | 7 | 0.332 | 0.431 |
 
-Dev / test (seed 1) of the best function of each run: see METHOD_zh 6d. Routing the five functions by cell (chosen on Train: visible 0.372, hidden 0.444) is the main method's correction step: dev 0.2822 / 0.4258 (same as the CORAL function), test 0.2923 / 0.4412. Every submission with its visible result is in `artifacts/meta_harness/<run>/`.
+Dev / test (seed 1) of the best function of each run: see METHOD_zh 6d. Routing the five functions by cell (chosen on Train: visible 0.372, hidden 0.444): dev 0.2822 / 0.4258 (same as the CORAL function), test 0.2923 / 0.4412.
+
+Round 2 (seed = routed version, new fold split, 3 agents with shared memory): 18 submissions, 12 accepted; visible 0.429 → 0.505, hidden 0.320 → 0.326; dev 0.2710 / 0.4228, test 0.2888 / 0.4355. Changes vs routed: train 36 (34 better / 2 worse), dev 6 (6 / 0), test 20 (18 / 2). This is the main method's correction step. Every submission with its visible result is in `artifacts/meta_harness/<run>/`.
 
 ## 1. Retrieval extraction instructions (tl2_evolve.py)
 

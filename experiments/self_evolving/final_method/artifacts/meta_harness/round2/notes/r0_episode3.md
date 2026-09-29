@@ -1,0 +1,7 @@
+# r0, episode 3
+
+- Read all notes from episodes 1–2, the accepted `0012_r2` harness, all 80 permitted Train views, and the 53 rows present in `visible_tasks.jsonl`. No submission made in this episode.
+- The accepted method now changes 31 Train forecasts from the base. Compared with its visible gains, the best full-strength solo correction beats it by more than 0.025 on just task_155 (+0.030). Task_200 has a smaller +0.015 gap. This audit is available as `shared/skills/audit_corrections.py`.
+- Task_155 has a late third-day extracted +20% traffic correction and visible truth spikes well above base during part of that window. Its leading source documents, however, explicitly forecast reduced occupancy throughout the three-day holiday period; later documents disagree and often refer to other corridors. No reliable document-based rule isolates that late increase, so applying it would be label-driven.
+- The other weak visible gains mostly coincide with corrections whose full-strength solo gains are negative. Tasks 186, 187, 65, 211, 47, and 68 have no extracted corrections and small base errors; broad text-only overrides are unsupported.
+- Copied the latest accepted `shared/best_harness.py` into `ws_r0/my_harness.py` and validated exactly H finite outputs on all 80 permitted Train tasks. It remains the strongest accepted function (visible fitness 0.4868, hidden check pass from episode 2 submission by r2).

@@ -177,24 +177,8 @@ def adjust(view):
     out = _before_long_daily_blend(view)
     base = view['base_forecast']
     error = view.get('task_toto_backtest_error')
-    if error is None:
-        error = view.get('cell_toto_backtest_error')
     if (view.get('cell') == 'day|seas' and view['H'] >= 100
             and error is not None and error <= 0.2
             and all(abs(a-b) < 1e-9 for a,b in zip(out,base))):
         return [float(0.5*a + 0.5*b) for a,b in zip(out,view['toto_forecast'])]
-    return out
-
-# For short hourly series without an extracted event, use some of an
-# independently trained level when its task-specific backtest is reliable.
-_before_short_hour_blend = adjust
-
-def adjust(view):
-    out = _before_short_hour_blend(view)
-    error = view.get('task_toto_backtest_error')
-    if (view.get('cell') == 'hour|flat' and view.get('H') == 24
-            and not view.get('corrections') and error is not None
-            and 0 <= error <= 0.6):
-        toto = view['toto_forecast']
-        return [float(0.5 * a + 0.5 * b) for a, b in zip(out, toto)]
     return out
