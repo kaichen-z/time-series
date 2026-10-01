@@ -1,0 +1,11 @@
+comic_con
+zinc_usd_t
+biodiversity
+steel_cny_t
+usdtoinr_exchangerate
+endangered_species
+rice_usd_cwt
+germanium_cny_kg
+air_pollution
+tellurium_cny_kg
+polyethylene_cny_t

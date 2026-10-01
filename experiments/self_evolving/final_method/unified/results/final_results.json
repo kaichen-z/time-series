@@ -1,0 +1,82 @@
+{
+ "rule": "dev >= 100 tasks: choose on dev among framework variants (v0 base, v1 horizon split, v2 + Chronos-2) and single TSFMs (Toto, TimesFM, Chronos-2); else keep the dataset's evolved version",
+ "drcik": {
+  "choice": "evolved (per-dataset Numerical<->Decision co-evolution)",
+  "dev": [
+   0.2687,
+   0.4184
+  ],
+  "test": [
+   0.2843,
+   0.4298
+  ],
+  "toto_test": [
+   0.3814,
+   0.5903
+  ],
+  "timesfm_test": [
+   0.3829,
+   0.6094
+  ]
+ },
+ "tmmd": {
+  "choice": "timesfm (dev .1289 vs framework v1 .1290)",
+  "test": [
+   0.1852,
+   0.2278
+  ],
+  "toto_test": [
+   0.202,
+   0.2505
+  ],
+  "without_health_us_test": {
+   "toto": [
+    0.1931,
+    0.2391
+   ],
+   "timesfm": [
+    0.1945,
+    0.2395
+   ],
+   "framework": [
+    0.1926,
+    0.2381
+   ],
+   "avg_toto_timesfm_chronos2": [
+    0.19,
+    0.2359
+   ]
+  }
+ },
+ "timesx": {
+  "choice": "framework v0",
+  "test_id": [
+   0.0698,
+   0.089
+  ],
+  "test_id_nMAE_nMSE": [
+   0.728,
+   0.738
+  ],
+  "test_ood": [
+   0.0513,
+   0.0658
+  ],
+  "toto_test_id": [
+   0.0778,
+   0.0948
+  ],
+  "timesfm_test_id": [
+   0.0715,
+   0.0886
+  ],
+  "timesfm_test_ood": [
+   0.0621,
+   0.0784
+  ],
+  "posttime_paper_nMAE_nMSE": [
+   0.738,
+   0.638
+  ]
+ }
+}
