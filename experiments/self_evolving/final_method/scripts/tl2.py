@@ -11,7 +11,10 @@ import argparse, hashlib, json, random, re, statistics, subprocess, sys, tempfil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, time as dtime
 from pathlib import Path
+import os
 import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from llm_backend import call_json
 
 TASKS = Path("external/Dr-CiK/full-download/Dr-CiK_public/tasks")
 CACHE = Path(".scratch/self_evolving/tl2_cache"); CACHE.mkdir(parents=True, exist_ok=True)
@@ -56,15 +59,11 @@ def prompt(instr, tid):
 
 
 def codex(pr, schema, model, timeout=1500):
-    with tempfile.TemporaryDirectory() as td:
-        sp = Path(td) / "s.json"; op = Path(td) / "o.json"; sp.write_text(json.dumps(schema))
-        subprocess.run(["codex", "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--ignore-rules",
-                        "-m", model, "--output-schema", str(sp), "-o", str(op), "-"],
-                       input=pr, text=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
-        return json.loads(op.read_text())
+    """Codex or Claude (opus/haiku/...) depending on the model name; see llm_backend.py."""
+    return call_json(model, pr, schema, timeout)
 
 
-def extract(instr, tids, model="gpt-6-luna", workers=8):
+def extract(instr, tids, model=os.environ.get("EXTRACT_MODEL", "gpt-6-luna"), workers=8):
     key = hashlib.sha256((instr + model).encode()).hexdigest()[:16]
     cf = CACHE / f"{key}.json"; cache = json.loads(cf.read_text()) if cf.exists() else {}
     todo = [t for t in tids if t not in cache]
@@ -160,6 +159,6 @@ unchanged, stay general (no task-specific entities or dates), under 350 words.
 Return JSON {"instructions": "..."}."""
 
 
-def mutate(instr, feedback, model="gpt-6-sol"):
+def mutate(instr, feedback, model=os.environ.get("MUTATE_MODEL", "gpt-6-sol")):
     schema = {"type": "object", "properties": {"instructions": {"type": "string"}}, "required": ["instructions"], "additionalProperties": False}
     return codex(MUT + "\nCURRENT INSTRUCTIONS:\n" + instr + "\nFEEDBACK:\n" + json.dumps(feedback, ensure_ascii=False)[:12000], schema, model, 900)["instructions"]

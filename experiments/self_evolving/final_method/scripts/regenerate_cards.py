@@ -17,6 +17,9 @@ from __future__ import annotations
 import argparse, hashlib, json, re, statistics, subprocess, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from llm_backend import call_json
 
 from evolving_loop.data import load_context_tasks_by_ids
 from evolving_loop.adjustment.post_adjust import _parse
@@ -74,13 +77,8 @@ def build_user(task, base):
 
 
 def call(model, prompt, timeout):
-    with tempfile.TemporaryDirectory() as td:
-        sp, op = Path(td) / "s.json", Path(td) / "o.json"; sp.write_text(json.dumps(SCHEMA))
-        subprocess.run(["codex", "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only",
-                        "-m", model, "--output-schema", str(sp), "-o", str(op), "-"],
-                       input=prompt, text=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=timeout)
-        return json.loads(op.read_text())
+    """Codex or Claude (opus/haiku/...) depending on the model name; see llm_backend.py."""
+    return call_json(model, prompt, SCHEMA, timeout)
 
 
 def main():

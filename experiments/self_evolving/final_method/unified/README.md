@@ -29,3 +29,21 @@ Notes: paths assume the repo root as cwd with caches under `.scratch/self_evolvi
 (TimesX data from github.com/haoxin1998/TimesX-project). TimesFM's Time-MMD advantage is almost entirely the US
 influenza domain on 2014–2024 windows (test joint error .24 vs .57–.63 for other models, not seen on 1999–2014
 train windows), consistent with possible pretraining overlap; without that domain the framework blend beats TimesFM.
+
+## Running with Claude (Opus / Haiku) instead of Codex models
+
+Every LLM call goes through `scripts/llm_backend.py`. A model name of `opus`, `sonnet`, `haiku` or any `claude-*` id
+(e.g. `claude-opus-5-5`, `claude-haiku-4-5-20251001`) uses the Claude Code CLI (`claude -p`, structured JSON output);
+any other name uses the `codex` CLI as before. Both CLIs must be installed and logged in.
+
+| step | how to pick the model |
+|---|---|
+| evidence extraction during instruction evolution (`scripts/tl2.py`) | `EXTRACT_MODEL=haiku` (default `gpt-6-luna`) |
+| instruction mutation (`scripts/tl2.py`) | `MUTATE_MODEL=opus` (default `gpt-6-sol`) |
+| regenerating correction cards (`scripts/regenerate_cards.py`) | `--model haiku` / `--model opus` |
+| TimesX correction cards (`unified/timesx/cordp_timesx.py`) | `CARDS_MODEL=opus` (default `haiku`) |
+| code-level co-evolution agents (`unified/coevo_drcik/run_phases.sh`, `scripts/coevolution/run_agent.py`) | `AGENT_MODEL=opus` (default `gpt-6-sol`) |
+
+Example: `AGENT_MODEL=opus bash unified/coevo_drcik/run_phases.sh <run_dir> drcik`.
+Claude agents run with `--permission-mode bypassPermissions` inside their workspace plus the shared run directory,
+mirroring Codex's `workspace-write` sandbox; run them only on a machine where that is acceptable.

@@ -2,12 +2,14 @@
 usage: run_agent.py <run_dir> <agent_id> [episodes=4] [per_episode=5] [focus]"""
 import json, os, subprocess, sys, time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from llm_backend import run_agent
 RUN = Path(sys.argv[1]).resolve(); AID = sys.argv[2]
 EPS = int(sys.argv[3]) if len(sys.argv) > 3 else 4; PER = int(sys.argv[4]) if len(sys.argv) > 4 else 5
 FOCUS = sys.argv[5] if len(sys.argv) > 5 else ""
 WS = RUN / f"ws_{AID}"; WS.mkdir(parents=True, exist_ok=True)
-TASK = (Path(__file__).parent / "TASK.md").read_text()
-MODEL = os.environ.get("AGENT_MODEL", "gpt-6-sol")
+TASK = Path(os.environ.get("TASK_FILE") or Path(__file__).parent / "TASK.md").read_text()
+MODEL = os.environ.get("AGENT_MODEL", "gpt-6-sol")  # or opus / haiku / claude-* (Claude Code CLI)
 
 
 def my_accepts():
@@ -35,9 +37,7 @@ for ep in range(1, EPS + 1):
     t0 = time.time()
     with open(WS / f"episode{ep}.log", "w") as lf:
         try:
-            subprocess.run(["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--add-dir", str(RUN),
-                            "-m", MODEL, "-C", str(WS), "-o", str(WS / f"episode{ep}_final.md"), "-"],
-                           input=prompt, text=True, env=env, stdout=lf, stderr=subprocess.STDOUT, timeout=7200)
+            run_agent(MODEL, prompt, WS, RUN, WS / f"episode{ep}_final.md", lf, env=env, timeout=7200)
         except subprocess.TimeoutExpired:
             lf.write("\n[episode timeout]\n")
     print(f"{AID} episode {ep} done in {round(time.time() - t0)}s, accepted so far {my_accepts()}", flush=True)
