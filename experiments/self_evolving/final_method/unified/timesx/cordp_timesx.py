@@ -6,7 +6,7 @@ proposes window multipliers. Two prompt variants:
 Writes timemmd/cards_<variant>.json {tid: {relevant, confidence, corrections:[[s,e,mult,rationale]]}}.
 Usage: PYTHONPATH=<repo> <repo>/.venv/bin/python cordp_tmmd.py <variant> <parts,comma> [workers]
 """
-import json, shutil, statistics, sys, threading
+import json, os, shutil, statistics, sys, threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from common.llm import ClaudeCLIClient, ClaudeCLIConfig, parse_json_object, JsonExtractionError
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent / "timesx"
 TASKS = {t["tid"]: t for t in json.loads((ROOT / "tasks.json").read_text())}
 TOTO = json.loads((ROOT / "toto.json").read_text())
 SUB = json.loads((ROOT / "extract_ids2.json").read_text())
-llm = ClaudeCLIClient(ClaudeCLIConfig(binary=shutil.which("claude") or "claude", model="haiku",
+llm = ClaudeCLIClient(ClaudeCLIConfig(binary=shutil.which("claude") or "claude", model=os.environ.get("CARDS_MODEL", "haiku"),
                                       timeout_seconds=600, cache_dir=str(ROOT / f"llm-cache-{VAR}")))
 DRCIK = (
     "You are a forecasting-correction module. A strong statistical model has ALREADY produced "
