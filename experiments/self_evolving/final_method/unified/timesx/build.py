@@ -2,13 +2,17 @@
 train = 88 ID variables, prediction window after 2023-01-01 and ending before 2025-02-01;
 test_id = 88 ID variables, window starting after 2025-01-30; test_ood = 11 held-out variables, same rule.
 dev = last train windows (window starting 2024-09-01..2025-01-30) of ID variables, carved out of train."""
-import json, glob, collections
-ID = set(open("id_vars.txt").read().split()); OOD = set(open("ood_vars.txt").read().split())
+import json, glob, collections, os
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[5]; HERE = Path(__file__).resolve().parent
+DATA = Path(os.environ.get("TIMESX_DATA", ROOT / "external/TimesX-project/Datasets"))
+OUT = Path(os.environ.get("OUT", ROOT / "work/timesx/tasks.json"))
+ID = set(open(HERE / "id_vars.txt").read().split()); OOD = set(open(HERE / "ood_vars.txt").read().split())
 out = []; miss = set()
-for f in sorted(glob.glob("/tmp/timesx/tx/Datasets/**/*.json", recursive=True)):
+for f in sorted(glob.glob(str(DATA / "**/*.json"), recursive=True)):
     d = json.load(open(f)); v = d["dataset_info"]["dataset_name"]
     if v not in ID and v not in OOD: miss.add(v); continue
-    dom = f.split("/Datasets/")[1].split("/")[0]
+    dom = Path(f).relative_to(DATA).parts[0]
     for s in d["samples"]:
         ft = s["future_time"]["timestamp"]; st, en = ft[0][:10], ft[-1][:10]
         if st > "2025-01-30": part = "test_id" if v in ID else "test_ood"
@@ -18,6 +22,6 @@ for f in sorted(glob.glob("/tmp/timesx/tx/Datasets/**/*.json", recursive=True)):
                         history=[float(x) for x in s["past_time"]["value"]], truth=[float(x) for x in s["future_time"]["value"]],
                         future_ts=ft, background=s["background"], scenario=s["scenario"], holiday=s["holiday_info"],
                         covariates=s["covariates_info"]))
-json.dump(out, open("tasks.json", "w"))
+OUT.parent.mkdir(parents=True, exist_ok=True); json.dump(out, open(OUT, "w"))
 print(len(out), collections.Counter(t["part"] for t in out), "vars", len({t["var"] for t in out}), "unmatched vars", len(miss))
 print(collections.Counter((t["part"], t["domain"]) for t in out))

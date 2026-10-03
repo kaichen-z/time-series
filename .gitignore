@@ -26,6 +26,8 @@ runs/method_filtering/combined103_10_smoke_20260823/
 runs/method_filtering/combined103_full_80_20_99_20260823/
 outputs/
 external/
+work/learned_baselines/
+runs/learned_baselines/
 .env
 
 # Byte-compiled / optimized / DLL files

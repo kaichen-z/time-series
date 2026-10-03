@@ -1,5 +1,11 @@
 # Dr-CiK public evolution splits
 
+## Time-MMD protocol
+
+`timemmd_531_181_182_v1.json` freezes the 894 Time-MMD task IDs into 531 Train, 181 Dev, and
+182 Test tasks. Its three-task `smoke` subset is drawn from Dev. Zero-shot baseline evaluation uses
+the manifest directly rather than cache-local partition labels.
+
 The repository freezes deterministic, entity-disjoint manifests over the 199 tasks in the
 public Dr-CiK development set. The official 80 hidden-test tasks are never included.
 

@@ -35,5 +35,14 @@ huggingface_hub>=0.25       # verified: 1.16.1
 chronos-forecasting>=2.2.0  # verified: 2.3.1
 timesfm[torch]>=2.0.2       # verified: 2.0.2
 
+# --- Learned multimodal baselines ------------------------------------------
+# Time-LLM and MM-TSFlib use transformers directly. PostTime additionally
+# uses parameter-efficient SFT and GRPO over a 4-bit Gemma checkpoint.
+accelerate>=1.2
+peft>=0.14
+trl>=0.16
+bitsandbytes>=0.45
+sentencepiece>=0.2
+
 # --- Tests -----------------------------------------------------------------
 pytest>=8.0                 # verified: 9.1.1
