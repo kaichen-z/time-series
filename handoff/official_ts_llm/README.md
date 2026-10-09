@@ -43,27 +43,21 @@ PYTHONPATH=. python scripts/export_official_llm_handoff.py \
 
 ## Haiku output contract
 
-Process every document in `timesx_train_dev_documents.jsonl` and
+Process every unique document in `timesx_train_dev_documents.jsonl` and
 `time_mmd_documents.jsonl` without using future numerical values. Return one
-JSONL row per input task (use `document_ids` to join Time-MMD tasks to its
-deduplicated documents):
+JSONL row per `document_id`; the task files provide the task-to-document join:
 
 ```json
 {
-  "task_id": "official_...",
+  "document_id": "official_...",
   "extractor": {"provider": "anthropic", "model": "...", "prompt_sha256": "..."},
-  "cards": [
+  "events": [
     {
-      "document_id": "official_..._background",
-      "events": [
-        {
-          "time_start": "YYYY-MM-DD or null",
-          "time_end": "YYYY-MM-DD or null",
-          "direction": "up|down|mixed|unknown",
-          "confidence": 0.0,
-          "evidence": "short source-grounded paraphrase"
-        }
-      ]
+      "time_start": "YYYY-MM-DD or null",
+      "time_end": "YYYY-MM-DD or null",
+      "direction": "up|down|mixed|unknown",
+      "confidence": 0.0,
+      "evidence": "short source-grounded paraphrase"
     }
   ]
 }
@@ -71,11 +65,11 @@ deduplicated documents):
 
 Requirements:
 
-1. Preserve `task_id` and `document_id` exactly.
+1. Preserve every `task_id` and `document_id` exactly; do not synthesize IDs.
 2. Do not infer or emit target values, forecasts, weights, or Test records.
 3. Use `null`/`unknown` rather than inventing dates or direction.
 4. Record the exact model identifier and prompt hash.
-5. Keep the output one line per task and valid UTF-8 JSONL.
+5. Keep the output one line per document and valid UTF-8 JSONL.
 
 Opus can work on prompts/policies using these IDs and Haiku cards, but final
 candidate scoring remains Train/CV-only in this repository. Dev is evaluated
