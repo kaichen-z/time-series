@@ -10,8 +10,11 @@ identities used by the official benchmark loader.
   public documents. Each row contains `task_id`, `split`, public timestamps,
   frequency, horizon, target description, and four document records.
 - `time_mmd_train_dev_task_ids.jsonl`: 51,728 Time-MMD Train/Dev task IDs with
-  split, group, frequency, and horizon. Time-MMD has no public per-window text,
-  so no documents were invented.
+  split, group, frequency, horizon, and references to official retrieved-text
+  documents at the forecast origin.
+- `time_mmd_documents.jsonl`: deduplicated Time-MMD `Final_Search_2/4/6`
+  retrieved facts. `Final_Output` is deliberately excluded because it is a
+  closed-source-LLM prediction rather than source evidence.
 - `receipt.json`: exact source commits, loader fingerprints, row counts, and
   SHA-256 hashes.
 - `alignment_manifest.json`: the full path/hash/split protocol consumed by the
@@ -40,8 +43,10 @@ PYTHONPATH=. python scripts/export_official_llm_handoff.py \
 
 ## Haiku output contract
 
-Process every document in `timesx_train_dev_documents.jsonl` without using
-future numerical values. Return one JSONL row per input task:
+Process every document in `timesx_train_dev_documents.jsonl` and
+`time_mmd_documents.jsonl` without using future numerical values. Return one
+JSONL row per input task (use `document_ids` to join Time-MMD tasks to its
+deduplicated documents):
 
 ```json
 {

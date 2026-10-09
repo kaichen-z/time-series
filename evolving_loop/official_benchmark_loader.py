@@ -238,10 +238,11 @@ def load_official_time_mmd(
         if _sha256(path) != record["sha256"]:
             raise OfficialBenchmarkLoaderError(f"Time-MMD source hash mismatch: {relative}")
         with path.open(newline="", encoding="utf-8-sig") as handle:
-            values = [
-                float(row["OT"]) if row["OT"].strip() else math.nan
-                for row in csv.DictReader(handle)
-            ]
+            rows = list(csv.DictReader(handle))
+        values = [
+            float(row["OT"]) if row["OT"].strip() else math.nan
+            for row in rows
+        ]
         n = len(values)
         n_train, n_test = int(n * 0.7), int(n * 0.2)
         n_dev = n - n_train - n_test
@@ -268,6 +269,19 @@ def load_official_time_mmd(
                     external_key = f"time_mmd:{domain}:h{horizon}:{part_name}:t{origin}"
                     task_id = _opaque_id("time_mmd", external_key)
                     truth = tuple(standardized[origin : origin + horizon])
+                    documents = tuple(
+                        Document(
+                            document_id=_opaque_id(
+                                "time_mmd_document",
+                                f"{relative_repo}:{origin}:{field}",
+                            ),
+                            content=rows[origin][field].strip(),
+                        )
+                        for field in ("Final_Search_2", "Final_Search_4", "Final_Search_6")
+                        if field in rows[origin]
+                        and rows[origin][field].strip()
+                        and rows[origin][field].strip().upper() != "NA"
+                    )
                     output.append(
                         BenchmarkNumericWindow(
                             task_id=task_id,
@@ -275,6 +289,8 @@ def load_official_time_mmd(
                             history=tuple(standardized[origin - lookback : origin]),
                             truth=truth,
                             frequency=cadence,
+                            documents=documents,
+                            target_description=f"Time-MMD {domain} target series",
                             anchor_forecasts=_anchors_for(
                                 anchor_cache,
                                 task_id,

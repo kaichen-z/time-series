@@ -6,9 +6,13 @@
     "alignment_manifest.json": {
       "sha256": "4cc43aa18d37d8ff3a1d32763f516603640b15c0ff5b9185b15ff7cd123ada0d"
     },
+    "time_mmd_documents.jsonl": {
+      "rows": 38781,
+      "sha256": "1361ff04b6ee56a9e269d15a4909dbe691a1da943a0006a983423730b59feaf4"
+    },
     "time_mmd_train_dev_task_ids.jsonl": {
       "rows": 51728,
-      "sha256": "5048c892e41fe012d1ff82cb8a6364e484452257d99b0a85aa11dd7a18e78fa2"
+      "sha256": "13634add65b8cba38177a51094c1bbd89ee0d71762e969b014a6621cd926ca6a"
     },
     "timesx_train_dev_documents.jsonl": {
       "documents": 10892,
@@ -16,7 +20,7 @@
       "sha256": "51a4818cdf01ecc16b51b6143dc03c495b59de36accf91b20d4ab1ea93ff41a6"
     }
   },
-  "schema": "official-llm-handoff-v1",
+  "schema": "official-llm-handoff-v2",
   "sources": {
     "time_mmd": {
       "commit": "e789ce78c9bafd8e3ba0d8850f9ad2becbe83548",

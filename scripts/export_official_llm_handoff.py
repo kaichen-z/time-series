@@ -83,24 +83,42 @@ def main() -> None:
             }
         )
 
-    time_mmd_rows = [
-        {
-            "task_id": window.task_id,
-            "split": split,
-            "group_id": window.group_id,
-            "frequency": window.frequency,
-            "horizon": len(window.truth),
-        }
-        for split, window in _base_rows(time_mmd)
-    ]
+    time_mmd_rows = []
+    time_mmd_documents: dict[str, str] = {}
+    for split, window in _base_rows(time_mmd):
+        document_ids = []
+        for document in window.documents:
+            previous = time_mmd_documents.setdefault(document.document_id, document.content)
+            if previous != document.content:
+                raise RuntimeError(f"document identity collision: {document.document_id}")
+            document_ids.append(document.document_id)
+        time_mmd_rows.append(
+            {
+                "task_id": window.task_id,
+                "split": split,
+                "group_id": window.group_id,
+                "frequency": window.frequency,
+                "horizon": len(window.truth),
+                "target_description": window.target_description,
+                "document_ids": document_ids,
+            }
+        )
 
     timesx_path = args.output / "timesx_train_dev_documents.jsonl"
     time_mmd_path = args.output / "time_mmd_train_dev_task_ids.jsonl"
+    time_mmd_documents_path = args.output / "time_mmd_documents.jsonl"
     _write_jsonl(timesx_path, timesx_rows)
     _write_jsonl(time_mmd_path, time_mmd_rows)
+    _write_jsonl(
+        time_mmd_documents_path,
+        [
+            {"document_id": document_id, "content": content}
+            for document_id, content in sorted(time_mmd_documents.items())
+        ],
+    )
 
     receipt = {
-        "schema": "official-llm-handoff-v1",
+        "schema": "official-llm-handoff-v2",
         "contains_test_ids": False,
         "contains_labels": False,
         "contains_numeric_history": False,
@@ -128,6 +146,10 @@ def main() -> None:
             time_mmd_path.name: {
                 "rows": len(time_mmd_rows),
                 "sha256": _sha256(time_mmd_path),
+            },
+            time_mmd_documents_path.name: {
+                "rows": len(time_mmd_documents),
+                "sha256": _sha256(time_mmd_documents_path),
             },
         },
     }
