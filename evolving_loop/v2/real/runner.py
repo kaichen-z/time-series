@@ -374,8 +374,8 @@ def _load_prepared_real_p2(
         for split in ("train", "dev")
         for row in tasks[split]
     }
-    if len(task_ids) != 100 or set(evidence.by_task) != task_ids:
-        raise RealRunnerError("prepared P2 evidence does not close Train80/Dev20")
+    if not task_ids or set(evidence.by_task) != task_ids:
+        raise RealRunnerError("prepared P2 evidence does not close registered Train/Dev")
     return PreparedRealP2InputsV2(
         config, seed, tasks,
         MappingProxyType(identities), prepared, dictionary,
@@ -540,8 +540,8 @@ def prepare_real_p2_inputs(
         prepared, dictionary_sha256=dictionary_sha
     )
     expected_ids = {task.numeric.task_id for task in host.tasks}
-    if set(evidence.by_task) != expected_ids or len(expected_ids) != 100:
-        raise RealRunnerError("prepared P2 evidence does not close Train80/Dev20")
+    if not expected_ids or set(evidence.by_task) != expected_ids:
+        raise RealRunnerError("prepared P2 evidence does not close registered Train/Dev")
 
     task_manifest = {
         "schema_version": 1,

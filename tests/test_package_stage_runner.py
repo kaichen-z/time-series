@@ -217,9 +217,17 @@ def test_schedule_is_nested_registered_and_group_aware() -> None:
     assert len(schedule.fingerprint) == 64
 
 
-def test_schedule_rejects_a_non_eighty_train_partition() -> None:
-    with pytest.raises(PackageStageError, match="80"):
-        PackageStageSchedule.build(TRAIN_80[:79], DEV_20, seed=20260903)
+def test_schedule_accepts_variable_registered_partitions() -> None:
+    schedule = PackageStageSchedule.build(TRAIN_80[:40], DEV_20[:12], seed=20260903)
+    assert schedule.counts == (8, 32, 40, 12)
+    assert set(schedule.fold_manifest.task_fold_map) == set(schedule.train80_ids)
+
+
+def test_schedule_rejects_empty_or_overlapping_partitions() -> None:
+    with pytest.raises(PackageStageError, match="nonempty"):
+        PackageStageSchedule.build((), DEV_20, seed=20260903)
+    with pytest.raises(PackageStageError, match="disjoint"):
+        PackageStageSchedule.build(TRAIN_80, TRAIN_80[:1], seed=20260903)
 
 
 def test_tasks_for_verifies_exact_membership() -> None:

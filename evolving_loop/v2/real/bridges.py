@@ -290,8 +290,10 @@ def run_real_cooperative(
     if type(dictionary) is not P3NumericalDictionaryV2:
         raise TypeError("real cooperative bridge requires a P3 Dictionary closure")
     tasks = tuple(host.tasks)
-    if len(tasks) != 100 or len(host.train_tasks) != 80 or len(host.dev_tasks) != 20:
-        raise ValueError("real cooperative Host requires frozen Train80/Dev20 tasks")
+    if not tasks or not host.train_tasks or not host.dev_tasks:
+        raise ValueError("real cooperative Host requires nonempty Train/Dev tasks")
+    if len(tasks) != len(host.train_tasks) + len(host.dev_tasks):
+        raise ValueError("real cooperative Host task universe does not close Train/Dev")
     train, dev = select_real_task_projection(
         host.train_tasks,
         host.dev_tasks,

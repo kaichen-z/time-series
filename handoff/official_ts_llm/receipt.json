@@ -1,0 +1,32 @@
+{
+  "contains_labels": false,
+  "contains_numeric_history": false,
+  "contains_test_ids": false,
+  "files": {
+    "alignment_manifest.json": {
+      "sha256": "4cc43aa18d37d8ff3a1d32763f516603640b15c0ff5b9185b15ff7cd123ada0d"
+    },
+    "time_mmd_train_dev_task_ids.jsonl": {
+      "rows": 51728,
+      "sha256": "5048c892e41fe012d1ff82cb8a6364e484452257d99b0a85aa11dd7a18e78fa2"
+    },
+    "timesx_train_dev_documents.jsonl": {
+      "documents": 10892,
+      "rows": 2723,
+      "sha256": "51a4818cdf01ecc16b51b6143dc03c495b59de36accf91b20d4ab1ea93ff41a6"
+    }
+  },
+  "schema": "official-llm-handoff-v1",
+  "sources": {
+    "time_mmd": {
+      "commit": "e789ce78c9bafd8e3ba0d8850f9ad2becbe83548",
+      "source_fingerprint": "91f1eae94470234fe0357b3af2b85b7383bb126b384731bc41c2618977cfe432",
+      "url": "https://github.com/AdityaLab/MM-TSFlib"
+    },
+    "timesx": {
+      "commit": "26bc70cfa669407c71ae1ad6ce2194be9cfe9a0b",
+      "source_fingerprint": "07e9a0eec359acd8f9f6fe0503f27d842119bf0bd303871b56cd483b6957b996",
+      "url": "https://github.com/haoxin1998/TimesX-project"
+    }
+  }
+}

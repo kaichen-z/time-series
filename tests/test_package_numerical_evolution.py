@@ -21,6 +21,7 @@ from evolving_loop.package_numerical_evolution import (
 )
 from evolving_loop.package_numerical_supply import (
     NumericalAlternativeSpec,
+    NumericalSupplyError,
     NumericalSupplyRelease,
 )
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
@@ -153,6 +154,20 @@ def test_fit_numerical_recipe_uses_host_grid_and_deterministic_rank() -> None:
     assert fitted.full_build_task_ids == tuple(task.task_id for task in tasks)
     assert len(fitted.numerical_score_sha256) == 64
     assert fitted == fit_numerical_recipe(recipe, rows, manifest, _parent())
+
+
+def test_fit_numerical_recipe_accepts_registered_variable_train_universe() -> None:
+    tasks = _tasks(15)
+    rows = _build_rows(tasks)
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+
+    fitted = fit_numerical_recipe(_recipe(), rows, manifest, _parent())
+
+    assert fitted.full_build_task_ids == tuple(task.task_id for task in tasks)
+    assert set(fitted.full_build_task_ids) == set(manifest.task_fold_map)
+    assert tuple(fold for fold, _policy in fitted.build_fold_policies) == tuple(
+        range(5)
+    )
 
 
 def test_fit_numerical_recipe_never_accepts_dev_or_public_rows() -> None:
@@ -1050,36 +1065,61 @@ def test_proposer_binds_tasks_to_the_parent_registry_exactly() -> None:
         )
 
 
-def test_proposer_and_materializer_reject_non_100_task_universes() -> None:
-    tasks = _tasks()
+def test_proposer_and_materializer_accept_registered_variable_split_universes() -> None:
+    tasks = _tasks(15)
     manifest = build_group_fold_manifest(tasks, seed=20260903)
-    extra = replace(
-        _evolution_tasks()[-1],
-        numeric=replace(
-            _evolution_tasks()[-1].numeric,
-            task_id="public_case_100",
-        ),
+    host_tasks = (
+        *_evolution_tasks()[:15],
+        *_evolution_tasks()[80:85],
     )
-    oversized = (*_evolution_tasks(), extra)
 
-    with pytest.raises(NumericalPackageEvolutionError, match="100"):
+    proposer = NumericalPackageProposer(
+        proposer=ChampionProposerAdapter.scripted(
+            identity="variable_split_fixture",
+            proposal_batches=(_proposal_batch(),),
+            config={"fixture": True},
+        ),
+        materializer=_RecordingMaterializer(),
+        build_rows=_build_rows(tasks),
+        fold_manifest=manifest,
+        tasks=host_tasks,
+    )
+    materializer = NumericalPackageMaterializer(
+        forecast_store=_FixtureForecastStore(),
+        screening_policy=_screening(),
+        fold_manifest=manifest,
+        original_tasks=host_tasks,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+    )
+
+    assert proposer.fold_manifest == manifest
+    assert materializer.fold_manifest == manifest
+
+
+def test_proposer_and_materializer_reject_missing_or_empty_dev_universes() -> None:
+    tasks = _tasks(15)
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    train_only = _evolution_tasks()[:15]
+
+    with pytest.raises(NumericalPackageEvolutionError, match="nonempty disjoint Dev"):
         NumericalPackageProposer(
             proposer=ChampionProposerAdapter.scripted(
-                identity="oversized_fixture",
+                identity="train_only_fixture",
                 proposal_batches=(_proposal_batch(),),
                 config={"fixture": True},
             ),
             materializer=_RecordingMaterializer(),
             build_rows=_build_rows(tasks),
             fold_manifest=manifest,
-            tasks=oversized,
+            tasks=train_only,
         )
-    with pytest.raises(NumericalPackageEvolutionError, match="100"):
+    with pytest.raises(NumericalPackageEvolutionError, match="registered Train"):
         NumericalPackageMaterializer(
             forecast_store=_FixtureForecastStore(),
             screening_policy=_screening(),
             fold_manifest=manifest,
-            original_tasks=oversized,
+            original_tasks=(*train_only[1:], _evolution_tasks()[80]),
             source_fingerprints={"dictionary": "2" * 64},
             runtime_fingerprints={"materializer": "3" * 64},
         )
@@ -1145,6 +1185,135 @@ def _seed_only_retained_combined_spec() -> NumericalAlternativeSpec:
         assumption_ids=retained.assumption_ids,
         failure_conditions=retained.failure_conditions,
     )
+
+
+def test_anchored_residual_requires_a_bounded_overlay_recipe() -> None:
+    retained = _retained_combined_spec()
+    payload = retained.to_payload()
+
+    with pytest.raises(
+        NumericalSupplyError,
+        match="anchored_residual materializers require a bounded_overlay recipe",
+    ):
+        NumericalAlternativeSpec(
+            candidate_id=retained.candidate_id,
+            family=retained.family,
+            materializer_kind="anchored_residual",
+            recipe_payload=payload["recipe_payload"],
+            full_build_policy_payload=payload["full_build_policy_payload"],
+            build_fold_policy_payloads=tuple(
+                (fold, policy)
+                for fold, policy in payload["build_fold_policy_payloads"]
+            ),
+            assumption_ids=retained.assumption_ids,
+            failure_conditions=retained.failure_conditions,
+        )
+
+
+def _anchored_residual_spec() -> NumericalAlternativeSpec:
+    assumptions = tuple(
+        EvolutionAssumption(
+            assumption_id=f"anchored_{name}",
+            candidate_name=name,
+            feature="history_length",
+            direction="above",
+            horizon_region="full",
+            operator="bounded_overlay",
+            rationale="History supports a bounded correction around the anchor.",
+            failure_condition="History no longer supports the bounded correction.",
+        )
+        for name in ("toto_2_0", "seasonal_naive")
+    )
+    recipe = ChampionRecipe(
+        name="anchored_residual_candidate",
+        kind="bounded_overlay",
+        parents=("toto_2_0", "seasonal_naive"),
+        fallback_parent="toto_2_0",
+        assumptions=assumptions,
+    )
+
+    def policy(alpha: float) -> FittedChampionPolicy:
+        return FittedChampionPolicy(
+            recipe=recipe,
+            thresholds=tuple(
+                (assumption.assumption_id, 0.0) for assumption in assumptions
+            ),
+            overlay_alpha=alpha,
+            correction_cap=0.5,
+        )
+
+    return NumericalAlternativeSpec(
+        candidate_id=recipe.name,
+        family="combined",
+        materializer_kind="anchored_residual",
+        recipe_payload=recipe.to_payload(),
+        full_build_policy_payload=policy(0.5).to_payload(),
+        build_fold_policy_payloads=tuple(
+            (fold, policy(0.40 + fold * 0.01).to_payload()) for fold in range(5)
+        ),
+        assumption_ids=tuple(item.assumption_id for item in assumptions),
+        failure_conditions=tuple(item.failure_condition for item in assumptions),
+    )
+
+
+def test_anchored_residual_dispatches_through_the_frozen_policy_path(
+    monkeypatch,
+) -> None:
+    specification = _anchored_residual_spec()
+    materializer = object.__new__(NumericalPackageMaterializer)
+    task = _evolution_tasks()[0].numeric_view()
+    context = replace(_evolution_tasks()[0], numeric=task, labels_public=False)
+    policy = FittedChampionPolicy(
+        recipe=ChampionRecipe(
+            name="fixture_overlay",
+            kind="bounded_overlay",
+            parents=("toto_2_0", "seasonal_naive"),
+            fallback_parent="toto_2_0",
+            assumptions=tuple(
+                EvolutionAssumption(
+                    assumption_id=f"fixture_{name}",
+                    candidate_name=name,
+                    feature="history_length",
+                    direction="above",
+                    horizon_region="full",
+                    operator="bounded_overlay",
+                    rationale="Fixture bounded residual.",
+                    failure_condition="Fixture condition fails.",
+                )
+                for name in ("toto_2_0", "seasonal_naive")
+            ),
+        ),
+        thresholds=(("fixture_toto_2_0", 0.0), ("fixture_seasonal_naive", 0.0)),
+        overlay_alpha=0.5,
+        correction_cap=0.5,
+    )
+    marker = object()
+    seen = {}
+
+    monkeypatch.setattr(
+        NumericalPackageMaterializer,
+        "_stored_policy_for_task",
+        lambda self, supplied, task_id: policy,
+    )
+
+    def proposal(self, source, supplied_policy, supplied_task, candidate_id, family):
+        seen.update(
+            policy=supplied_policy,
+            task=supplied_task,
+            candidate_id=candidate_id,
+            family=family,
+        )
+        return marker
+
+    monkeypatch.setattr(NumericalPackageMaterializer, "_proposal_forecast", proposal)
+
+    assert materializer._materialize_alternative(object(), context, specification) is marker
+    assert seen == {
+        "policy": policy,
+        "task": context,
+        "candidate_id": specification.candidate_id,
+        "family": specification.family,
+    }
 
 
 def test_materializer_rematerializes_every_retained_parent_alternative() -> None:

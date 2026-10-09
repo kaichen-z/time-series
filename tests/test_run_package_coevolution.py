@@ -503,6 +503,23 @@ def _write_split_manifest(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def test_split_manifest_accepts_registered_variable_sizes(tmp_path) -> None:
+    split = _split_manifest()
+    partitions = split["partitions"]
+    partitions["train"]["task_ids"] = partitions["train"]["task_ids"][:15]
+    partitions["dev"]["task_ids"] = partitions["dev"]["task_ids"][:5]
+    partitions["public_test"]["task_ids"] = partitions["public_test"]["task_ids"][:7]
+    sizes = {"train": 15, "dev": 5, "public_test": 7}
+    split["target_sizes"] = sizes
+    split["actual_sizes"] = sizes
+    split_path = tmp_path / "variable-split.json"
+    _write_split_manifest(split_path, split)
+
+    _payload, train, dev = run_module._validated_split(split_path)
+    assert len(train) == 15
+    assert len(dev) == 5
+
+
 def test_label_informed_split_requires_explicit_regression_opt_in(tmp_path) -> None:
     split = _split_manifest()
     split.update(

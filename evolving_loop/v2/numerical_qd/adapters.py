@@ -1020,10 +1020,12 @@ class LegacyNumericalAdapter:
             }
         self._operator_input_sha256s = MappingProxyType(operator_inputs)
         self.tasks = _tasks(tasks)
-        if len(self.tasks) != 100 or type(fold_manifest) is not GroupFoldManifest or fold_manifest.fold_count != 5:
-            raise ValueError("adapter requires exactly 80 grouped Train plus 20 Dev tasks")
-        if len(fold_manifest.task_fold_map) != 80 or not set(fold_manifest.task_fold_map) <= {t.numeric.task_id for t in self.tasks}:
-            raise ValueError("adapter requires the exact 80-task Train fold manifest")
+        if not self.tasks or type(fold_manifest) is not GroupFoldManifest or fold_manifest.fold_count != 5:
+            raise ValueError("adapter requires a nonempty grouped Train/Dev task universe")
+        train_ids = set(fold_manifest.task_fold_map)
+        host_ids = {t.numeric.task_id for t in self.tasks}
+        if not train_ids or not train_ids < host_ids:
+            raise ValueError("adapter requires a nonempty exact Train fold manifest and Dev tasks")
         if not callable(getattr(materializer, "materialize", None)):
             raise ValueError("materializer must implement the legacy typed boundary")
         if type(materializer) is NumericalPackageMaterializer:

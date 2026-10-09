@@ -573,8 +573,8 @@ def _parse_task_manifest(payload: Mapping[str, object]):
         raise ValueError("Numerical task manifest train/dev must be lists")
     train = tuple(_parse_numerical_task(value) for value in manifest["train"])
     dev = tuple(_parse_numerical_task(value) for value in manifest["dev"])
-    if len(train) != 80 or len(dev) != 20:
-        raise ValueError("Numerical task manifest requires exactly Train80 and Dev20")
+    if not train or not dev:
+        raise ValueError("Numerical task manifest requires nonempty Train and Dev")
     ids = tuple(task.numeric.task_id for task in (*train, *dev))
     if len(ids) != len(set(ids)):
         raise ValueError("Numerical task manifest task identities must be unique")
@@ -589,7 +589,7 @@ def _parse_task_manifest(payload: Mapping[str, object]):
     )
     if folds.to_payload() != fold_payload:
         raise ValueError(
-            "Numerical task fold manifest does not bind exact Train80 groups"
+            "Numerical task fold manifest does not bind the exact Train groups"
         )
     return (*train, *dev), folds
 
@@ -599,7 +599,7 @@ def _parse_cooperative_task_manifest(
 ) -> dict[str, tuple[ContextTask, ...]]:
     """Parse only the compact 4/1 cooperative task schema.
 
-    This is intentionally separate from the Project 2 Train80/Dev20 parser.
+    This is intentionally separate from the Project 2 full-split parser.
     """
     manifest = _exact_fields(
         payload,

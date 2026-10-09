@@ -1340,13 +1340,16 @@ class EvolutionKernel:
             genome = NumericalGenomeV2.from_payload(executable["genome"])
             child_release = parse_numerical_supply_release(executable["supply"])
             child_registry = FrozenNumericalRegistryEnvelopeV2.from_payload(executable["registry"])
-            if (genome.fingerprint() != winner or evaluation.genome_sha256 != winner
+            full_build_ids = tuple(executable["fit"]["full_build_task_ids"])
+            if (not full_build_ids or set(evaluation.task_ids) != set(full_build_ids)
+                    or len(evaluation.task_ids) != len(full_build_ids)
+                    or genome.fingerprint() != winner or evaluation.genome_sha256 != winner
                     or evaluation.supply_sha256 != child_release.fingerprint
                     or evaluation.registry_sha256 != child_registry.registry_sha256
                     or child_registry.release_sha256 != child_release.fingerprint
                     or child_release.source_fingerprints.get("genome") != winner
                     or evaluation.objectives.to_payload() != train["train_objectives"]
-                    or len(evaluation.task_ids) != 80 or not evaluation.constraints.feasible
+                    or not evaluation.constraints.feasible
                     or dict(evaluation.runtime_fingerprints) != dict(bundle.runtime_fingerprints)
                     or evaluation.protocol_fingerprint != bundle.protocol_fingerprint):
                 raise KernelAuthorityError("typed Numerical winner Train/executable binding mismatch")

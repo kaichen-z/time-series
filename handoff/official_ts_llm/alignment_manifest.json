@@ -1,0 +1,2354 @@
+{
+  "schema": "official-ts-alignment-v1",
+  "time_mmd": {
+    "commit": "e789ce78c9bafd8e3ba0d8850f9ad2becbe83548",
+    "data_files": [
+      {
+        "columns": [
+          "Date",
+          "Wholesale broiler composite",
+          "OT",
+          "Retail-wholesale spread for broiler composite",
+          "date",
+          "start_date",
+          "end_date",
+          "his_avg_1",
+          "his_std_1",
+          "his_avg_3",
+          "his_std_3",
+          "his_avg_5",
+          "his_std_5",
+          "prior_history_avg",
+          "prior_history_std",
+          "his_avg_2",
+          "his_std_2",
+          "his_avg_4",
+          "his_std_4",
+          "his_avg_6",
+          "his_std_6",
+          "his_avg_7",
+          "his_std_7",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6"
+        ],
+        "date_max": "2024-04-01",
+        "date_min": "1983-01-01",
+        "path": "repos/MM-TSFlib/data/Algriculture/US_RetailBroilerComposite_Month.csv",
+        "rows": 496,
+        "sha256": "5282f65522dd454b60607cf953cb5d8032238b9c02693da88c9d1a94ee5fc028"
+      },
+      {
+        "columns": [
+          "Date",
+          "OT",
+          "Anomaly",
+          "start_date",
+          "end_date",
+          "date",
+          "his_avg_1",
+          "his_std_1",
+          "his_avg_2",
+          "his_std_2",
+          "his_avg_3",
+          "his_std_3",
+          "his_avg_4",
+          "his_std_4",
+          "his_avg_5",
+          "his_std_5",
+          "his_avg_6",
+          "his_std_6",
+          "his_avg_7",
+          "his_std_7",
+          "prior_history_avg",
+          "prior_history_std",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6"
+        ],
+        "date_max": "2024-04-01",
+        "date_min": "1983-01-01",
+        "path": "repos/MM-TSFlib/data/Climate/US_precipitation_month.csv",
+        "rows": 496,
+        "sha256": "bc408ff580ad498385189af99f529ab70d605f76983908f92787f494fe718353"
+      },
+      {
+        "columns": [
+          "Month",
+          "Exports",
+          "Imports",
+          "OT",
+          "start_date",
+          "date",
+          "end_date",
+          "his_avg_1",
+          "his_std_1",
+          "his_avg_2",
+          "his_std_2",
+          "his_avg_3",
+          "his_std_3",
+          "his_avg_4",
+          "his_std_4",
+          "his_avg_5",
+          "his_std_5",
+          "his_avg_6",
+          "his_std_6",
+          "his_avg_7",
+          "his_std_7",
+          "prior_history_avg",
+          "prior_history_std",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6"
+        ],
+        "date_max": "2024-03-01",
+        "date_min": "1989-01-01",
+        "path": "repos/MM-TSFlib/data/Economy/US_TradeBalance_Month.csv",
+        "rows": 423,
+        "sha256": "14f1500baa505ad40ec9389b3038cea8ac92de6177b8337cc0990786b63e30a8"
+      },
+      {
+        "columns": [
+          "date",
+          "OT",
+          "Weekly East Coast All Grades All Formulations Retail Gasoline Prices  (Dollars per Gallon)",
+          "Weekly New England (PADD 1A) All Grades All Formulations Retail Gasoline Prices  (Dollars per Gallon)",
+          "Weekly Central Atlantic (PADD 1B) All Grades All Formulations Retail Gasoline Prices  (Dollars per Gallon)",
+          "Weekly Lower Atlantic (PADD 1C) All Grades All Formulations Retail Gasoline Prices  (Dollars per Gallon)",
+          "Weekly Midwest All Grades All Formulations Retail Gasoline Prices  (Dollars per Gallon)",
+          "Weekly Gulf Coast All Grades All Formulations Retail Gasoline Prices  (Dollars per Gallon)",
+          "Weekly Rocky Mountain All Grades All Formulations Retail Gasoline Prices  (Dollars per Gallon)",
+          "Weekly West Coast All Grades All Formulations Retail Gasoline Prices  (Dollars per Gallon)",
+          "start_date",
+          "end_date",
+          "prior_history_avg",
+          "prior_history_std",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6",
+          "Final_Output"
+        ],
+        "date_max": "2024-04-29",
+        "date_min": "1996-01-01",
+        "path": "repos/MM-TSFlib/data/Energy/US_GasolinePrice_Week.csv",
+        "rows": 1479,
+        "sha256": "b52a39670b0c082b7df3e1d518a083180b061b3d59cb8e9c32a23de37533bbdc"
+      },
+      {
+        "columns": [
+          "CBSA",
+          "CBSA Code",
+          "date",
+          "OT",
+          "Category",
+          "Defining Parameter",
+          "Defining Site",
+          "Number of Sites Reporting",
+          "start_date",
+          "end_date",
+          "his_avg_1",
+          "his_std_1",
+          "his_avg_2",
+          "his_std_2",
+          "his_avg_3",
+          "his_std_3",
+          "his_avg_4",
+          "his_std_4",
+          "his_avg_5",
+          "his_std_5",
+          "his_avg_6",
+          "his_std_6",
+          "his_avg_7",
+          "his_std_7",
+          "prior_history_avg",
+          "prior_history_std",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6"
+        ],
+        "date_max": "2012-05-24",
+        "date_min": "1982-01-01",
+        "path": "repos/MM-TSFlib/data/Environment/NewYork_AQI_Day.csv",
+        "rows": 11102,
+        "sha256": "39227170fe0aa773a44643694b8eb55e1b4721949831d131c113d50b57ad3caa"
+      },
+      {
+        "columns": [
+          "date",
+          "start_date",
+          "end_date",
+          "REGION TYPE",
+          "REGION",
+          "YEAR",
+          "WEEK",
+          "% WEIGHTED ILI",
+          "OT",
+          "AGE 0-4",
+          "AGE 25-49",
+          "AGE 25-64",
+          "AGE 5-24",
+          "AGE 50-64",
+          "AGE 65",
+          "ILITOTAL",
+          "NUM. OF PROVIDERS",
+          "TOTAL PATIENTS",
+          "YEAR_WEEK",
+          "prior_history_avg",
+          "prior_history_std",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6",
+          "Final_Output"
+        ],
+        "date_max": "2024-05-06",
+        "date_min": "1997-09-29",
+        "path": "repos/MM-TSFlib/data/Public_Health/US_FLURATIO_Week.csv",
+        "rows": 1389,
+        "sha256": "0b0e6170e14a021f28905b6ef1840c6e0605cafb81e1aace71a912b7e2d89930"
+      },
+      {
+        "columns": [
+          "date",
+          "OT",
+          "start_date",
+          "end_date",
+          "his_avg_3",
+          "his_std_3",
+          "his_avg_5",
+          "his_std_5",
+          "his_avg_1",
+          "his_std_1",
+          "his_avg_2",
+          "his_std_2",
+          "his_avg_4",
+          "his_std_4",
+          "his_avg_6",
+          "his_std_6",
+          "prior_history_avg",
+          "prior_history_std",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6"
+        ],
+        "date_max": "2024-05-01",
+        "date_min": "1999-09-01",
+        "path": "repos/MM-TSFlib/data/Security/US_FEMAGrant_Month.csv",
+        "rows": 297,
+        "sha256": "6eae9bea431b61c8e718135b28cb086bcfc0dccb54e77994ae29805989d677e2"
+      },
+      {
+        "columns": [
+          "date",
+          "start_date",
+          "end_date",
+          "OT",
+          "his_avg_1",
+          "his_std_1",
+          "his_avg_3",
+          "his_std_3",
+          "his_avg_5",
+          "his_std_5",
+          "prior_history_avg",
+          "prior_history_std",
+          "his_avg_2",
+          "his_std_2",
+          "his_avg_4",
+          "his_std_4",
+          "his_avg_6",
+          "his_std_6",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6"
+        ],
+        "date_max": "2024-12-01",
+        "date_min": "1950-01-01",
+        "path": "repos/MM-TSFlib/data/SocialGood/Unadj_UnemploymentRate_ALL_processed.csv",
+        "rows": 900,
+        "sha256": "1d75dc22b739cb657e7af0d9b5f64c23313c9065ce76b79a7cccd5f85d5f92b8"
+      },
+      {
+        "columns": [
+          "OT",
+          "Date",
+          "start_date",
+          "date",
+          "end_date",
+          "prior_history_avg",
+          "prior_history_std",
+          "Final_Search_2",
+          "Final_Search_4",
+          "Final_Search_6",
+          "Final_Output"
+        ],
+        "date_max": "2024-03-01",
+        "date_min": "1980-01-01",
+        "path": "repos/MM-TSFlib/data/Traffic/US_VMT_Month.csv",
+        "rows": 531,
+        "sha256": "0389d74a266626ab00e0c3ddc47d5810b58fe74d10726a50ec759df3f984e615"
+      }
+    ],
+    "excluded_custom_corpus": "The prior 894-task corpus is not paper-comparable.",
+    "protocol": {
+      "daily": {
+        "horizons": [
+          48,
+          96,
+          192,
+          336
+        ],
+        "lookback": 96
+      },
+      "domains": 9,
+      "metric": "MSE in standardized space",
+      "paper_test_batch_size": 32,
+      "paper_test_drop_last": true,
+      "monthly": {
+        "horizons": [
+          6,
+          8,
+          10,
+          12
+        ],
+        "lookback": 8
+      },
+      "scaler": "fit on train only",
+      "split": "chronological 0.7/0.1/0.2",
+      "test_stride": 1,
+      "weekly": {
+        "horizons": [
+          12,
+          24,
+          36,
+          48
+        ],
+        "lookback": 36
+      }
+    },
+    "source": "https://github.com/AdityaLab/MM-TSFlib.git"
+  },
+  "timesx": {
+    "commit": "26bc70cfa669407c71ae1ad6ce2194be9cfe9a0b",
+    "comparability_limit": "PostTime states its exact refreshed corpus/code will be released upon acceptance; this manifest freezes the current public TimesX repository, not an unpublished private snapshot.",
+    "files": [
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/barley_inr_t_96_12_12_10events.json",
+        "samples": 51,
+        "sha256": "d129cba7c82c5e07c01d29ea4953b6771b5ee8cf93a2337ae447fbdba38a7a3b",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 27
+        },
+        "variable": "barley_inr_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/canola_cad_t_96_12_12_10events.json",
+        "samples": 61,
+        "sha256": "b0e4000e74e61284193d514ceb32f5d1c9cd993eeb17166528bd66d627bbeebd",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 36
+        },
+        "variable": "canola_cad_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/cocoa_usd_t_96_12_12_10events.json",
+        "samples": 67,
+        "sha256": "42763fc315698b4ec6e2e9553bcacb45ac4418e1f3f1235915900d8363efccae",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "cocoa_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/cotton_usd_lbs_96_12_12_10events.json",
+        "samples": 67,
+        "sha256": "6bc68d6660cb28338e8c67d91eafa438793b14d6617d9d8d6a896b32ca376f5e",
+        "split_counts": {
+          "id_test": 26,
+          "outside_official_split": 1,
+          "post_training": 40
+        },
+        "variable": "cotton_usd_lbs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/diammonium_usd_t_96_12_12_10events.json",
+        "samples": 65,
+        "sha256": "b8040aa61722227f8995afff723e71381d95e0843f4681ff8f522a9231070401",
+        "split_counts": {
+          "id_test": 22,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "diammonium_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/oat_usd_bu_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "648b5d8c3eda4d6a2f48c6a649b44183819aaa966b1dde2b13e263727ff73203",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 41
+        },
+        "variable": "oat_usd_bu"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/potatoes_eur_100kg_96_12_12_10events.json",
+        "samples": 67,
+        "sha256": "492f6c8b338ef3c172b37715d85f73bd7857bb04caefd5b0147aa629d9f146c3",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 43
+        },
+        "variable": "potatoes_eur_100kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/rice_usd_cwt_96_12_12_10events.json",
+        "samples": 82,
+        "sha256": "890e7f5ef3ee1f54e9a9a53173ce26aad5d0bb7ff367521a1df59efe05af30ab",
+        "split_counts": {
+          "ood_test": 24,
+          "outside_official_split": 58
+        },
+        "variable": "rice_usd_cwt"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/sugar_usd_lbs_96_12_12_10events.json",
+        "samples": 70,
+        "sha256": "e6c3efdc470ba1c494ce71d35f5373c57885d2ff0e8c4a0b56905e8afe669842",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 45
+        },
+        "variable": "sugar_usd_lbs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/urea_usd_t_96_12_12_10events.json",
+        "samples": 60,
+        "sha256": "1f4af7d5c6233b7668437ef614c2dd5577b78e8e1a03b1965b83d3fef81cc279",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 36
+        },
+        "variable": "urea_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/CropsAndStaples/wheat_usd_bu_96_12_12_10events.json",
+        "samples": 68,
+        "sha256": "c8bbfe28e64bc2ba59190b2af22c4e4e9a4df2935256569b1de0a1ea29041852",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 43
+        },
+        "variable": "wheat_usd_bu"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/bitumen_cny_t_96_12_12_10events.json",
+        "samples": 76,
+        "sha256": "6ab190df3eca8a9908890bfa064c1ce8e60c0b64a184024d16df0829bad860ac",
+        "split_counts": {
+          "outside_official_split": 76
+        },
+        "variable": "bitumen_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/brent_usd_bbl_96_12_12_10events.json",
+        "samples": 65,
+        "sha256": "c4aa1710d2968c52d0ef85ec0e864e60d58b7ed07b473477f1ff52f851847594",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 40
+        },
+        "variable": "brent_usd_bbl"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/coal_usd_t_96_12_12_10events.json",
+        "samples": 83,
+        "sha256": "9beccffbe90f9f36b7cdbefd58699dc1cd6abcc866df87aec1f563712cb7733c",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 15,
+          "post_training": 44
+        },
+        "variable": "coal_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/ethanol_usd_gal_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "2b1c04604265c5034d0c6cfe92705ae664fd850dc2e1d0d387c711a004d5f4ea",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "ethanol_usd_gal"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/gasoline_usd_gal_96_12_12_10events.json",
+        "samples": 73,
+        "sha256": "1586e6dde639024d616c85f22a7adf427e15bed5a936423b3f9c022820f7847c",
+        "split_counts": {
+          "id_test": 25,
+          "outside_official_split": 1,
+          "post_training": 47
+        },
+        "variable": "gasoline_usd_gal"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/methanol_cny_t_96_12_12_10events.json",
+        "samples": 58,
+        "sha256": "30a9b45b656f32cd7e3d2c0441d09d0a93d33d8f7141b5f2ca026a02090b43a5",
+        "split_counts": {
+          "id_test": 23,
+          "post_training": 35
+        },
+        "variable": "methanol_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/naphtha_usd_t_96_12_12_10events.json",
+        "samples": 62,
+        "sha256": "32c3df581425acf73949a6fdb173b13d36e112fb3681b6c46bfbeacc59ee25fb",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 38
+        },
+        "variable": "naphtha_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/propane_usd_gal_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "1022b504f2fadafdf152815a1a44076934ec6a47f865486c86043edce3d51d64",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "propane_usd_gal"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/rapeseed_eur_t_96_12_12_10events.json",
+        "samples": 73,
+        "sha256": "a71c8f78941e183405e39464a73207508ee78fee1ac455edbdeb3fa49cba1bdb",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 3,
+          "post_training": 46
+        },
+        "variable": "rapeseed_eur_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/EnergyAndFuels/uranium_usd_lbs_96_12_12_10events.json",
+        "samples": 49,
+        "sha256": "b24906780b44951123cfde84b76249470176cec0d41d95e23e94d30f5fcb053c",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 24
+        },
+        "variable": "uranium_usd_lbs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/beef_brl_kg_96_12_12_10events.json",
+        "samples": 68,
+        "sha256": "9efd5e23b590d6943f0eb82f7495ff1d375efc5683ed3f43800cff0adf77eccf",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 44
+        },
+        "variable": "beef_brl_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/butter_eur_t_96_12_12_10events.json",
+        "samples": 60,
+        "sha256": "c7e654eb682b2d94d029d2c7899e264fe9e9d5f891213ca117d58de6bf0c83b2",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 35
+        },
+        "variable": "butter_eur_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/cheese_usd_lbs_96_12_12_10events.json",
+        "samples": 61,
+        "sha256": "fbe3f5a3e0deab88151b5e24d2de809a27852668b85cdc8f82644f67e0a86fd5",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 36
+        },
+        "variable": "cheese_usd_lbs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/coffee_usd_lbs_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "9140653ded339f343c04cb8501d855c2739e50d0dc9f9e3cd4557d203ada6c24",
+        "split_counts": {
+          "id_test": 24,
+          "post_training": 42
+        },
+        "variable": "coffee_usd_lbs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/corn_usd_bu_96_12_12_10events.json",
+        "samples": 83,
+        "sha256": "afa38396ec16e9ca21d292724352330019474cd92337fddd42cc405233777d5d",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 15,
+          "post_training": 44
+        },
+        "variable": "corn_usd_bu"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/milk_usd_cwt_96_12_12_10events.json",
+        "samples": 68,
+        "sha256": "6326f8b039ab4f09d27aaaae89819efc3335dfae07c03a27307de8504d103122",
+        "split_counts": {
+          "id_test": 25,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "milk_usd_cwt"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/poultry_brl_kgs_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "2bfc748e5b98a320fbac3070bca6fe148dce12791cfcf5c7002d5ff3b0c412b9",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "poultry_brl_kgs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/salmon_nok_kg_96_12_12_10events.json",
+        "samples": 44,
+        "sha256": "31b0763faeec5ab2e8b24517d4258a2a2f444087b50cffff20833f9b48dbe2fa",
+        "split_counts": {
+          "id_test": 5,
+          "post_training": 39
+        },
+        "variable": "salmon_nok_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/soybeans_usd_bu_96_12_12_10events.json",
+        "samples": 82,
+        "sha256": "721bf55d50e39cd4d0950c69eaa887e8626a8bbfb0be6c6e1f5e1913b3b6c7df",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 15,
+          "post_training": 43
+        },
+        "variable": "soybeans_usd_bu"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/LivestockAndFoodProducts/wool_aud_100kg_96_12_12_10events.json",
+        "samples": 68,
+        "sha256": "34d78be546075565737c9120b8deefd80bc3d5db4af234f24b7de3373737db2c",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 43
+        },
+        "variable": "wool_aud_100kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/aluminum_usd_t_96_12_12_10events.json",
+        "samples": 53,
+        "sha256": "b3b2011c214912a54bff386c65c7710f39de214cb0fa01766fa0de7b9d4a76d8",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 28
+        },
+        "variable": "aluminum_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/copper_usd_lbs_96_12_12_10events.json",
+        "samples": 67,
+        "sha256": "e5c5148e0762244c5f7c7ef358478f2190cc56c41395e783e15b85f7ff96b2af",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "copper_usd_lbs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/lead_usd_t_96_12_12_10events.json",
+        "samples": 83,
+        "sha256": "4d7df62108e69efbb7a53e59020d9a92d861680abc1eaefbff79ab8043767a01",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 15,
+          "post_training": 44
+        },
+        "variable": "lead_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/lumber_usd_1000_board_feet_96_12_12_10events.json",
+        "samples": 67,
+        "sha256": "2a3a6c36fb38284838b45675e3b58d1ad06d190ef6410b12909088457b00107a",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 43
+        },
+        "variable": "lumber_usd_1000_board_feet"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/polyethylene_cny_t_96_12_12_10events.json",
+        "samples": 53,
+        "sha256": "07184490f5aeaf2432cdb428117bc180b10a3df52fd551b757cd2b6d2b8f83fe",
+        "split_counts": {
+          "ood_test": 22,
+          "outside_official_split": 31
+        },
+        "variable": "polyethylene_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/polypropylene_cny_t_96_12_12_10events.json",
+        "samples": 65,
+        "sha256": "78dd44204af16e3c6b8c51bf4379630b8f364a48ed73a762ce25b295eea7637b",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 41
+        },
+        "variable": "polypropylene_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/rubber_usd_cents_kg_96_12_12_10events.json",
+        "samples": 63,
+        "sha256": "d5617be042b5949081d414b7677eda4d6859a0c8f1badd4ca2d4434e5684fe1d",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 38
+        },
+        "variable": "rubber_usd_cents_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/steel_cny_t_96_12_12_10events.json",
+        "samples": 63,
+        "sha256": "2da18151200a5265423f22a559b2e9a0115edcbab764bb0d74b815bbf5afe434",
+        "split_counts": {
+          "ood_test": 23,
+          "outside_official_split": 40
+        },
+        "variable": "steel_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/tin_usd_t_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "85be723ecea16568cc472aeaa0a6f4362a7ce44aa88eb51938316739b15f8554",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 41
+        },
+        "variable": "tin_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/RawMaterialsAndConstruction/zinc_usd_t_96_12_12_10events.json",
+        "samples": 62,
+        "sha256": "20db99cb1b3c09f42cab7cf1caa750903e7b556abb619bd7fcb0deb8597d70d1",
+        "split_counts": {
+          "ood_test": 24,
+          "outside_official_split": 38
+        },
+        "variable": "zinc_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/SpecialtyAndAdvancedMaterials/gallium_cny_kg_96_12_12_10events.json",
+        "samples": 55,
+        "sha256": "06d48d6e63b323d238a7d835f9b5c6a23e781f5244bb6797b00eb23f973e19ea",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 31
+        },
+        "variable": "gallium_cny_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/SpecialtyAndAdvancedMaterials/germanium_cny_kg_96_12_12_10events.json",
+        "samples": 65,
+        "sha256": "d5b70fba11ba6f17d9cd69365b21e1ababfefafab6267f2ffc570f12b18bd16f",
+        "split_counts": {
+          "ood_test": 23,
+          "outside_official_split": 42
+        },
+        "variable": "germanium_cny_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/SpecialtyAndAdvancedMaterials/indium_cny_kg_96_12_12_10events.json",
+        "samples": 67,
+        "sha256": "b6503a561c14930e4bd94e546584a736cf7fcc68af3207e5cc10c782debeed76",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 43
+        },
+        "variable": "indium_cny_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/SpecialtyAndAdvancedMaterials/magnesium_cny_t_96_12_12_10events.json",
+        "samples": 59,
+        "sha256": "3d04eeecaaaf1813c3d7372359e995db22072b20dd0745bf7d964915ae1e937d",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 1,
+          "post_training": 35
+        },
+        "variable": "magnesium_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/SpecialtyAndAdvancedMaterials/molybdenum_cny_kg_96_12_12_10events.json",
+        "samples": 37,
+        "sha256": "6c527d1710dc4b62b0f045752e157b62098666f46fe802623b2abebaf277078b",
+        "split_counts": {
+          "id_test": 22,
+          "outside_official_split": 1,
+          "post_training": 14
+        },
+        "variable": "molybdenum_cny_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/SpecialtyAndAdvancedMaterials/polyvinyl_cny_t_96_12_12_10events.json",
+        "samples": 63,
+        "sha256": "c7adb9e69e9c17a4288a658cc8dd53a7ff8f3df8677becd1ccbae72bfde7b49e",
+        "split_counts": {
+          "id_test": 22,
+          "outside_official_split": 1,
+          "post_training": 40
+        },
+        "variable": "polyvinyl_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/SpecialtyAndAdvancedMaterials/tellurium_cny_kg_96_12_12_10events.json",
+        "samples": 65,
+        "sha256": "a5afbcaf4af51c6cbad8edb7cbc65337cef923adbd4d93a34bcac15ddd864ed2",
+        "split_counts": {
+          "ood_test": 23,
+          "outside_official_split": 42
+        },
+        "variable": "tellurium_cny_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/SpecialtyAndAdvancedMaterials/titanium_cny_kg_96_12_12_10events.json",
+        "samples": 37,
+        "sha256": "99bd85812b3ae7557a9f7b45c5d83c59800272e875836f6a02563c37c23d83b2",
+        "split_counts": {
+          "outside_official_split": 37
+        },
+        "variable": "titanium_cny_kg"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/cobalt_usd_t_96_12_12_10events.json",
+        "samples": 72,
+        "sha256": "ab60daca78d6ba65100e1e62d7dd2ac333a8fb6e805d1045de14bf91cf8b4e12",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 5,
+          "post_training": 44
+        },
+        "variable": "cobalt_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/gold_usd_t_oz_96_12_12_10events.json",
+        "samples": 68,
+        "sha256": "61fe81060caadc83afc69f080c6529d4f3772715f67c83a26abb21f427feef67",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 43
+        },
+        "variable": "gold_usd_t_oz"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/lithium_cny_t_96_12_12_10events.json",
+        "samples": 78,
+        "sha256": "389842af89c8be1de2c6d5247f951fcf68d7a40ec474fd1e0de8844f32978a1e",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 13,
+          "post_training": 42
+        },
+        "variable": "lithium_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/manganese_cny_mtu_96_12_12_10events.json",
+        "samples": 59,
+        "sha256": "ef4b8dd28b94c901e0c8c335feb8e195c97082491f3d9e335de09161a12e8cfc",
+        "split_counts": {
+          "outside_official_split": 59
+        },
+        "variable": "manganese_cny_mtu"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/neodymium_cny_t_96_12_12_10events.json",
+        "samples": 81,
+        "sha256": "f7b05444f2c45f7e7addf597cb948dec196de29e3f922c804cde9da8f882d7d1",
+        "split_counts": {
+          "id_test": 23,
+          "outside_official_split": 15,
+          "post_training": 43
+        },
+        "variable": "neodymium_cny_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/nickel_usd_t_96_12_12_10events.json",
+        "samples": 70,
+        "sha256": "d9e2d3cdf84e3b564461092e5231c27031e558b1b2dc2a1da9b227a1245bf986",
+        "split_counts": {
+          "id_test": 25,
+          "outside_official_split": 1,
+          "post_training": 44
+        },
+        "variable": "nickel_usd_t"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/palladium_usd_t_oz_96_12_12_10events.json",
+        "samples": 68,
+        "sha256": "ec533e4dc82cacde8b7a721858b14350b190cdb8c726d88c3edccf772baae8e3",
+        "split_counts": {
+          "id_test": 24,
+          "post_training": 44
+        },
+        "variable": "palladium_usd_t_oz"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/platinum_usd_t_oz_96_12_12_10events.json",
+        "samples": 84,
+        "sha256": "23f73ce9d1df3ece4ad12ab2467ee733e5ac606f2b62667fd7ef5c8c1d6780f8",
+        "split_counts": {
+          "id_test": 25,
+          "outside_official_split": 14,
+          "post_training": 45
+        },
+        "variable": "platinum_usd_t_oz"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/rhodium_usd_t_oz_96_12_12_10events.json",
+        "samples": 67,
+        "sha256": "a988350f8ae7766b3ac0140810485828dea20f8b3bca1938b5ce71ba27d5845b",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "rhodium_usd_t_oz"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/CommodityPrice/StrategicAndHighValueMaterials/silver_usd_t_oz_96_12_12_10events.json",
+        "samples": 68,
+        "sha256": "7ad7d3dde89f294664f8d3097fbf2ee1d98afcd5522f2ebfe7b306e2379802d6",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 43
+        },
+        "variable": "silver_usd_t_oz"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtoaud_exchangerate_96_12_12_10events.json",
+        "samples": 67,
+        "sha256": "408d6b35c5e79b567982054eddebfdff635f0fa5584334c6bba4213467c001c7",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 42
+        },
+        "variable": "usdtoaud_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtobrl_exchangerate_96_12_12_10events.json",
+        "samples": 68,
+        "sha256": "a4e8913810148fff125bede8f93ae3a63769b8cacfcdcff9532e2e49fd827d7a",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 43
+        },
+        "variable": "usdtobrl_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtocad_exchangerate_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "b1d2404cfdbd8e9b60426d6107887b002386df463aede959c7c4b2a42bfaf9ae",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 41
+        },
+        "variable": "usdtocad_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtochf_exchangerate_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "7d30f67d7b943635556d8fd5743571a9766a238b59b981ec92782ef28f20114f",
+        "split_counts": {
+          "outside_official_split": 66
+        },
+        "variable": "usdtochf_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtogbp_exchangerate_96_12_12_10events.json",
+        "samples": 82,
+        "sha256": "74eaa431cac3208b93d56a0c1f84712e3254f2f6cd089f4d7d920d2d0eb329ba",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 15,
+          "post_training": 43
+        },
+        "variable": "usdtogbp_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtohkd_exchangerate_96_12_12_10events.json",
+        "samples": 82,
+        "sha256": "4ee3e2f5040623df17d147dd26911fff3b3ce00459127b5526291a41fb20cb3b",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 15,
+          "post_training": 43
+        },
+        "variable": "usdtohkd_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtoinr_exchangerate_96_12_12_10events.json",
+        "samples": 82,
+        "sha256": "8778ea8d2946ef806ab94f0a7fe99f74c37a604efc1829b39945783a8e0006cf",
+        "split_counts": {
+          "ood_test": 24,
+          "outside_official_split": 58
+        },
+        "variable": "usdtoinr_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtokrw_exchangerate_96_12_12_10events.json",
+        "samples": 66,
+        "sha256": "e9988b2ecb65102b7b6e44c6a5a228c818447390ad387434a0e7b23c45d5194e",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 1,
+          "post_training": 41
+        },
+        "variable": "usdtokrw_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtomxn_exchangerate_96_12_12_10events.json",
+        "samples": 82,
+        "sha256": "dc1709681545692198df27e428f0ef88b30c5262674ab9ca3dcc7b2e8d2a4734",
+        "split_counts": {
+          "id_test": 24,
+          "outside_official_split": 15,
+          "post_training": 43
+        },
+        "variable": "usdtomxn_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/Currency/usdtosgd_exchangerate_96_12_12_10events.json",
+        "samples": 79,
+        "sha256": "30c07899ea782df98af2e58df7998625da57df24c23c4a84f5fdb00a602605b7",
+        "split_counts": {
+          "outside_official_split": 79
+        },
+        "variable": "usdtosgd_exchangerate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/art_exhibitions_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "4edeb647f429dbd1c8341b25931da3da69f032eb574d65805cf032bf234e8aa0",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "art_exhibitions"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/broadway_shows_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "0e8c20fc9662cebf99a03ac490ee795c6b158ae0ee7572b4263d2de350232f44",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "broadway_shows"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/comic_con_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "5b2b24944d13ac61e564c603bed996c50e78f923fca5f0b8469a449b935031f6",
+        "split_counts": {
+          "ood_test": 12,
+          "outside_official_split": 17
+        },
+        "variable": "comic_con"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/esports_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "f33756d52c9c75def07c7aa915fa070fd096e5f892ff0eb140953be4c218c859",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "esports"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/film_festivals_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "d85481abf7ab03e515b98a40cff11952a6fa89fe1cc6f7ee10210c174b9bbfa9",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "film_festivals"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/food_wine_festivals_96_12_4_10events.json",
+        "samples": 20,
+        "sha256": "acac3f026b40889c76adfc43fa317579f03f7d94ea2ecf13445a5c1dbb124166",
+        "split_counts": {
+          "id_test": 3,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "food_wine_festivals"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/major_league_baseball_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "d6489ab8cd012a2a9cc626e0e6c01830d61e2f9c5b10f29ab62530b0836733a4",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "major_league_baseball"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/music_festivals_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "a1c4b0c91c3d93c49242a0c260634b88d0d0a7e9d34bd1a5863e093b60c3954e",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "music_festivals"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/national_basketball_association_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "9bb776122dc06fd55391227c1b76f29134135f1d9bbcec42f7305f18946dbf8b",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "national_basketball_association"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/arts/national_football_league_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "6216609eaafe84188bbfa4819628ef585f09a5fb847f65276e4dd85e708489a6",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "national_football_league"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/deforestation_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "6d3255bfca502fbefa15d43bc173b74d39bb78ae69ed3a4a615494644522e787",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "deforestation"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/drought_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "cab20ac52250301656f12a629d6444c2412d878907dc43b1c3876b06d0445f85",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "drought"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/endangered_species_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "ee34042c0ddbf5d62e5a4131d14ff4e2012d11d2a7cd36faf8f7a855ab3fb72b",
+        "split_counts": {
+          "ood_test": 12,
+          "outside_official_split": 17
+        },
+        "variable": "endangered_species"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/flooding_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "cea4e022127ed3f4cbb48b8a7e3560665a4f106c158175e85aa01d32378a8d0d",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "flooding"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/global_warming_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "e7e746ccbe5974a2687a2a431be025b31ed4dea05fefc8571757785355c8cd1a",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "global_warming"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/heatwave_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "6eef056be499d7173691349bf577983949a1d96593d6245b083becae5b857d06",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "heatwave"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/heavy_rainfall_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "e320c0868e12d0983e35273f89830f174d1991bc467f4a21e71872eb605173fb",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "heavy_rainfall"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/marine_pollution_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "f5375e2566783663c005c1d42d00b9a4316075a70c0cade6bcfd0a071d9f894d",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "marine_pollution"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/sustainable_fashion_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "6c6c0434d1d86022ca7c4bfe8fe154193c4c7c3eedc24cb388edb840fe722b33",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "sustainable_fashion"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/climate/water_scarcity_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "204b8d2289c0d25422b53f093b80069c2dc6368622e92043bba719134a3f96ca",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "water_scarcity"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/cost_of_living_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "de5d74d00b93e38fadd97d43592aae0b447337eeced538c67c09a8ce95838732",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "cost_of_living"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/federal_budget_deficit_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "0c4d2b03d344ab97e93c1ccb54ede68a2d2f912339c3fd776369ed8cba512fe0",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "federal_budget_deficit"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/government_spending_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "42c271d836506570dfa45873cdec143599304cddc4d8096cac33b7f2d935f87f",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "government_spending"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/healthcare_costs_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "05f0ac98ccfe6db756fe845b68250efa1135c289b789a371e4afd9d321e49f39",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "healthcare_costs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/inflation_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "b626c324453ff1c776392fb6ae3476005a58baea0760230d7cfa813b4ee2d8b5",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "inflation"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/international_trade_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "b8e2d71dbc93db2aa85252b78d3f8a71324d8e4b241980194151405ec2a3975f",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "international_trade"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/minimum_wage_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "6d836173e44ebd8df09ee845493cce46dfd8606cb8c8ec3936f1530d0d1c760a",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "minimum_wage"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/student_loans_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "3dd64b9bcecf97481cbaafde7e440504107df0fc7f547305628ae4762037523b",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "student_loans"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/taxes_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "3f0bcb330ca4eb9853e3bc43c518e14418c3dab13c0339e191d84a69cf8d5800",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "taxes"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/economy/unemployment_rate_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "703e166776a298b20c6d2507b0dbd33eced4fb3cffe0d6b5e3e30acced48f2dc",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "unemployment_rate"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/alphabet_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "1e149d6cafede7402d265396ce803a72c6f459e11c8d80a5ab28602da540895f",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "alphabet"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/amazon_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "cbb51a2e05ec92eba014db3435497d97b29a570e8c02c1e6889516695dff447e",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "amazon"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/apple_inc_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "0ed4e984d2ffb02409b6ac71a795084bca04128ef24331ea6e5337beb65d36e1",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "apple_inc"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/artificial_intelligence_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "61c5bb43c1c8b6869b654eada2978c6791b75203511cf2f525ec83d137abd801",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "artificial_intelligence"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/consumer_electronics_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "8403aef655a20c2127922d9e366c813a46cf4993c992538635577b287ee426ce",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "consumer_electronics"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/drones_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "95eae299f0210528eab2fcf3740769fd90a83599448e43a65dcf45973da6f6b7",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "drones"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/meta_platforms_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "a3bb4f5d5694a8bab4d7a9241aae31725a083ad50a74b95eeef66cf6bf1a76ae",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "meta_platforms"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/microsoft_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "2ec0fda11d38cc38392e01a3f068b6d2691c7d72d0a2e1bb9160d063a3f57e15",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "microsoft"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/nvidia_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "fef98ca92d21a410a038753305b9c088df0d9c31c8674237ae54b3397dc4bd46",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "nvidia"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/electronic_technology/robotics_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "bd55a5cba13c04198e60b57fa16eaee07af2c623b95138da8167c6085fbfbcbe",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "robotics"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/asset_management_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "71c99d149edb59cc5dd71b1fbd3fef40373e15bfe45e5f664bbe38fa3fecd19c",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "asset_management"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/cryptocurrency_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "b2b0702716467593fa8e5e81e053a13d990b15998fd176f5bdc0b13d9e0e5692",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "cryptocurrency"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/financial_regulation_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "3b47503df76bad5a706a337cdc75aa86e2e6f767f9c2c8782c5f9d64df217a79",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "financial_regulation"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/goldman_sachs_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "e208db906ef46fa58b3388312183e59150f33c403ee46b9741af392c52ce3f1c",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "goldman_sachs"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/hedge_funds_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "41ea2df2e79776e3f563b98f4f784c4625a0bee2e38c2c132d8e82c8d99edcec",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "hedge_funds"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/investment_banking_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "139fee0bb9e030055fd6a435727838633588feb7253f75669055ddee7e25ed2c",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "investment_banking"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/mortgage_rates_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "024de46dac6d03957e328b3d88f40855c5d6df4295b53b0f651c59b277d70964",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "mortgage_rates"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/private_equity_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "a38da4b416715e67737bc347074aecc36f01c01c7094462044fc9a7e1f650263",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "private_equity"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/stock_market_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "e3c7a904047927ae37d666c9f26aef04d602111e293d4a0336ac92a7f1dfda91",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "stock_market"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/finance/venture_capital_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "67664ef2e12d8f7a2f1c4422a6943aa360384e2ecad1704e6b8ba0a08501e2e0",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "venture_capital"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/animal_migration_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "035621ce27a055bbe811b7e07e78792f1827184c907534fcbd65caab1e37a450",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "animal_migration"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/animal_rescue_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "6e1d3d10ddb0e28ac38f25538e2cd7499ea2993cb89a79b16c670ceef86abdf7",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "animal_rescue"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/animal_welfare_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "16724b31291e5b8df071710b0faf77de3b5eed05ff23fc83e7598be4d4a60036",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "animal_welfare"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/beekeeping_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "f30eb89a2ba300a89396c98bd93266f731af163f48aba13221782fe0cd5b1cd9",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "beekeeping"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/biodiversity_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "7d9f840451498b844b5050a9e75c8aae50633f0ec76f37a77ab0a839d5ddc04b",
+        "split_counts": {
+          "ood_test": 12,
+          "outside_official_split": 17
+        },
+        "variable": "biodiversity"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/invasive_species_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "7ba572da2bfa8dc5bce0e1613bd8ed680c72c05ae18443c7c2da10855eb4a29d",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "invasive_species"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/marine_life_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "7c18ce77706c4941b2cf729880e2283727af4dbb12d88c1f7811ee37ecb7eb94",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "marine_life"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/pest_control_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "0e554c76e8b804b3f7022f31f127bc5ce1d5cc5ab9f81938fee7457e0316881c",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "pest_control"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/pet_adoption_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "db18392f1676334cf06af747adac937c6c4c9969a46baa104dc0ccf935754d51",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "pet_adoption"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/pets/pet_health_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "97d052cd853517334f8a868195d1086a93c0f5ba0c521769d37a165015d45def",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "pet_health"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/air_pollution_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "e37e4a3e497aed1f027b1102014d8474d58f73bbcd6859cb44a1531c9a9b6d40",
+        "split_counts": {
+          "ood_test": 12,
+          "outside_official_split": 17
+        },
+        "variable": "air_pollution"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/climate_change_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "1a156539a1f76e2427f92d066aedd7d031cc7862189bcacbacf8d5725391e31e",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "climate_change"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/diabetes_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "109988539acad1cd23c09fd9cb3ed958d6ec03d1206cb03a29f56d48a5710737",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "diabetes"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/drug_overdose_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "d409fe67bd5892c6204e72a8131e9dfdea2d5fdd0d6e4238d5ba55e486865bca",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "drug_overdose"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/food_safety_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "7795b7ae1b0e0a47de60665c0ce01edc1eca4146c28270deabf76af7613cc7e6",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "food_safety"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/hiv_aids_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "4554d227286f73222a5c61afffab0a3320b3e4d9df79b09d5bdb346ead9a5552",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "hiv_aids"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/infectious_disease_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "2e2f05580a4d2d40a0469b4874dfe75acb08518fd1bcba411e1581e7a68eee76",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "infectious_disease"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/mental_health_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "378174b75b5482840c9f087f2e8e55b463ef5032e327bf4e9d9d51b9cd2c64e0",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "mental_health"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/obesity_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "be1339e70d291caed1e195060a1b2dacc04c662032511874de68d02cf045d050",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "obesity"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_health/opioid_crisis_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "d6e5d36bc2c38ff97abb8db09261e598850eb13ae93d288618c79e584c01a6eb",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "opioid_crisis"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/carbon_emissions_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "da1da8d114430c00cf079b1992f057efebdbcfb61fceaa0742c1e7af31f76f59",
+        "split_counts": {
+          "id_test": 12,
+          "outside_official_split": 3,
+          "post_training": 14
+        },
+        "variable": "carbon_emissions"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/federal_reserve_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "ca26c7291bd8765a582837f148f20a7ced8434b24962865128b28f97f58e77f2",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "federal_reserve"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/healthcare_policy_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "8de9d21cdb68dbd3401e8424427058cba453c2ae3913be8e08a3aafdee10f403",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "healthcare_policy"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/human_rights_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "0cfb960512a67f216471decc3200fe6b29490267209c0bb239fcca90d6286962",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "human_rights"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/immigration_reform_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "c29d5e3b4dcdab986c0b22ad06893a1e1d17369942a83e611426c408132e2d85",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "immigration_reform"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/national_debt_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "c53f48ff6414c6975790203d65f9f03f6e44e23b94ba270473c57d4fd6beabb6",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "national_debt"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/presidential_election_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "e73867d4a26ce61d538203a2ee0db7186a5aea14e741c41ef06cc609789cbef9",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "presidential_election"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/refugee_support_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "81beaaf2dbc637ed5329dc8be08874861498818e8867b0da1889ded895ea3704",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "refugee_support"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/renewable_energy_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "c0f29635d7ccf0f3fdbc42b9ece22538f05ae920614f9bc8328b00a3b388be19",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "renewable_energy"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/space_exploration_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "e74af5d694ad73cfe55bbace192d461362aa17cc8f883d1c33912210da5e8c60",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "space_exploration"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/public_policy/wildlife_conservation_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "9269ce86d6a9c492138caf126b4fcfbe6d39e3a23e86b607ebe0932d6c7a10dc",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "wildlife_conservation"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/cancer_research_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "3df2bcc97d52a3b546faca0ac14e0a23dbe631317d58793fa355a52a6ffc7466",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "cancer_research"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/data_breach_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "86945c98d663c580acfacfed399cf8abf31de8de6638476f5afe78d3d74bbe7c",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "data_breach"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/earthquake_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "830b8713c0cc5befdcd225a66b8802b7b6f885a6d77ee93e59f5eb5be85761be",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "earthquake"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/food_recall_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "056dc1cc0e96333b5beec537a025025d3bd489b7320d12851ff3f0b6ea5ad8ee",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "food_recall"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/gene_editing_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "416ed54a22b071040df106e4a0e262649c44ca5e125e71e086b4507cbbab7276",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "gene_editing"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/meteor_shower_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "ad7d19ba4b226e3a6b53718dfe67cc8dcbff7dc093655f0650df56e7a1e86ee0",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "meteor_shower"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/nobel_prize_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "c4cc12916792b7552450deb5a891eda0979c8f05708c05dac2ab955533293523",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "nobel_prize"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/quantum_computing_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "cd16747f183ef497fab05d9b231b49042ae5ec33596f0f9ac8d7ad6343c84273",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "quantum_computing"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/vaccine_research_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "7076c39bfcb462f8dd17c2e01975b0a467e9f5d310a70f41ebb105a20fcae75f",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "vaccine_research"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/science/volcanic_eruption_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "d7bc067d63b94f989f731f02e9beae7d6bce985421de53ed3aeccd0dc8f89769",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "volcanic_eruption"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/air_conditioner_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "255b26c4929c4bf520d37ecdf9e069b7c83d166c0f57607d5af9290323fc527d",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "air_conditioner"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/back_to_school_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "aeea97dc1516ec5d7441efcca49d3677d2f1d06ef4401b9e346ced82f2c1f7cf",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "back_to_school"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/black_friday_deals_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "dc04c4fd310bd9f90ecd825fb350f1f86f727840b75d532dddaa6ef331d78b48",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "black_friday_deals"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/christmas_gifts_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "50e43f1bd4ec9ad303836fd3f5ce6572fde1c1c14ac7455f5254033e4f3127a0",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "christmas_gifts"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/fashion_week_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "8fd2e86eafe040f20e0acf9d2e7b9b8c7225356aefdd8a3c48e52d97264373b1",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "fashion_week"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/flu_shot_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "63ae9f948dd234ab4d4b1d0830357309ce6f5fc2e818166d4216e6abc5816ed9",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "flu_shot"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/halloween_costumes_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "526c1956c11bcc75e9e4109e0d5c428445b37797bd0dc6f5cf3a30486d6f8544",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "halloween_costumes"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/organic_food_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "fbbc22c604892ed35889d9c6605b4c7835e6e92f7c1e26bf3fc7c0e1599447b6",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "organic_food"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/ski_gear_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "9c5a959462ee6cb428538ed222e6dff8d9ee39bc59122eb8c6d87d1159a273a6",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "ski_gear"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/shopping/tax_software_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "454f08b9705d580e14259473a9abe3090dd82cf75f1a66f87d3e002dd50c14fb",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "tax_software"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/affordable_housing_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "1b1fc835e9e14195fed0ab7b5e74c054a6fe4499f68a5c52e4c13b54b3282cd1",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "affordable_housing"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/cybersecurity_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "d02a761ae2de4e0b093451c18f8fdf0a564a5224ce9f0f193aa5ecdc4d6315d7",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "cybersecurity"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/data_privacy_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "c61824d60915a640a4e7e1e7803c1c6db358a7459ddcb35220d677241d0d7241",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "data_privacy"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/domestic_violence_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "9ef827b32ab1feb93b37f1ebcc81f109b98bf31b638aa806f2ac034f206ae90f",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "domestic_violence"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/gender_equality_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "92eec165f409fe77c4ad694c4074cd4228542998c81b4b05318844edbf468ed0",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "gender_equality"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/homelessness_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "b2af0f43ccc05c115b903431e96792ac3bbedc498d1fb58e4609f809423cccbb",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "homelessness"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/income_inequality_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "fdf8375ae852a4d75401dfdf1a4f64af748fd209c08d86a07a6907da69ceb6f6",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "income_inequality"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/infrastructure_spending_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "548339485c428be8b2384d2d8f1eb1f314dcd516aed7a51bca796cef85d4fc22",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "infrastructure_spending"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/protest_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "c0417906912084209ad5bae5ebb93636dafbe8925ec634a64814a1316d8c2883",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "protest"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/society/wildfires_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "a41c612db052137eb2625c8ec54318d138c2fabfe13adb1d1e4989fc28fdf6b3",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "wildfires"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/air_travel_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "670535bac6c0f0f8d89f67f58f45f4817e7f7b1322d8355aa5b3abe4223eda1f",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "air_travel"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/autonomous_driving_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "01ed6dde95b735c9dd609b0955d86987d0366ffbcdf580ff49e531e157464620",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "autonomous_driving"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/electric_vehicle_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "e693e3f9a70e4e1a32ea5ca567643bc6a043cbff9a7dcb73aef5fdc0fe2c43c2",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "electric_vehicle"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/formula_1_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "09f16c4170af8864ed473884424c72e51fe879ab15887ec21334c8cf3baf08c4",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "formula_1"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/gas_prices_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "97d0c8576e0619d1daf0083261e69f41825a4ff1bb4df1cd483b67cc6791acef",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "gas_prices"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/rocket_launch_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "4939904a3772170e3adc9ca56bd701df469fb61899412e6437274f71f2ec5b3c",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "rocket_launch"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/tesla_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "3f1547599687364736b63a55840c315c46d0276ba5b2c71b70a7b2bd68300987",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "tesla"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/tour_de_france_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "a9de5cf3fca3edb1fdeb4db0713f9e73f065dea2c4b0ee02151d65b1824cd167",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "tour_de_france"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/traffic_insurance_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "dc4173f3f3287dacdbc1b925b6fedf13d9e8c6f764d53ee13dec3a1b90ff1b33",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "traffic_insurance"
+      },
+      {
+        "path": "repos/TimesX-project/Datasets/SearchTrend/traffic/used_car_96_12_4_10events.json",
+        "samples": 29,
+        "sha256": "206f0947a2e659c6d7ced175c6f8eb2e0d1249e3301f5e6e47235b145dba0b47",
+        "split_counts": {
+          "outside_official_split": 29
+        },
+        "variable": "used_car"
+      }
+    ],
+    "protocol": {
+      "daily_shift": 12,
+      "history": 96,
+      "horizon": 12,
+      "id_test": "88 seen variables; prediction start > 2025-01-30",
+      "metrics": [
+        "nMAE",
+        "nMSE"
+      ],
+      "note": "Any dev split must be an internal split of post_training, not an official paper split.",
+      "ood_test": "11 unseen variables; prediction start > 2025-01-30",
+      "post_training": "seen variables; start > 2023-01-01 and end < 2025-02-01",
+      "weekly_shift": 4
+    },
+    "release_note": "Repository README says cutoff refreshed to March 2026.",
+    "source": "https://github.com/haoxin1998/TimesX-project.git",
+    "split_counts": {
+      "id_test": 1695,
+      "ood_test": 211,
+      "outside_official_split": 3477,
+      "post_training": 2723
+    },
+    "split_lists": {
+      "id_sha256": "38f950967f4f705081aae107bfd57ad2af5c50686f252a65b942158fd92574f6",
+      "ood_sha256": "d2dff7981d178f1aa944cd6b836d5ebef6b7df4bf9cf2f7341ab5b45966f3529"
+    },
+    "variable_counts": {
+      "extra_repository": [
+        "affordable_housing",
+        "air_conditioner",
+        "air_travel",
+        "alphabet",
+        "amazon",
+        "animal_welfare",
+        "apple_inc",
+        "art_exhibitions",
+        "artificial_intelligence",
+        "asset_management",
+        "autonomous_driving",
+        "back_to_school",
+        "bitumen_cny_t",
+        "black_friday_deals",
+        "broadway_shows",
+        "cancer_research",
+        "christmas_gifts",
+        "consumer_electronics",
+        "cryptocurrency",
+        "cybersecurity",
+        "data_breach",
+        "data_privacy",
+        "domestic_violence",
+        "drones",
+        "earthquake",
+        "electric_vehicle",
+        "fashion_week",
+        "federal_budget_deficit",
+        "federal_reserve",
+        "financial_regulation",
+        "flooding",
+        "flu_shot",
+        "food_recall",
+        "formula_1",
+        "gas_prices",
+        "gender_equality",
+        "gene_editing",
+        "goldman_sachs",
+        "government_spending",
+        "halloween_costumes",
+        "healthcare_costs",
+        "healthcare_policy",
+        "hedge_funds",
+        "homelessness",
+        "human_rights",
+        "immigration_reform",
+        "income_inequality",
+        "infrastructure_spending",
+        "international_trade",
+        "investment_banking",
+        "manganese_cny_mtu",
+        "marine_life",
+        "mental_health",
+        "meteor_shower",
+        "microsoft",
+        "minimum_wage",
+        "mortgage_rates",
+        "national_debt",
+        "nobel_prize",
+        "nvidia",
+        "obesity",
+        "opioid_crisis",
+        "organic_food",
+        "pet_health",
+        "presidential_election",
+        "private_equity",
+        "protest",
+        "quantum_computing",
+        "refugee_support",
+        "renewable_energy",
+        "robotics",
+        "rocket_launch",
+        "ski_gear",
+        "space_exploration",
+        "stock_market",
+        "student_loans",
+        "sustainable_fashion",
+        "tax_software",
+        "taxes",
+        "tesla",
+        "titanium_cny_kg",
+        "tour_de_france",
+        "traffic_insurance",
+        "usdtochf_exchangerate",
+        "usdtosgd_exchangerate",
+        "used_car",
+        "vaccine_research",
+        "venture_capital",
+        "volcanic_eruption",
+        "wildfires",
+        "wildlife_conservation"
+      ],
+      "id": 88,
+      "missing_expected": [],
+      "ood": 11,
+      "paper_expected": 99,
+      "repository": 190
+    }
+  }
+}

@@ -52,14 +52,14 @@ NumericalSupplyFamily = Literal[
     "statistical", "tsfm", "combined", "atlas_overlay"
 ]
 NumericalMaterializerKind = Literal[
-    "dictionary", "champion", "atlas", "bounded_overlay"
+    "dictionary", "champion", "atlas", "bounded_overlay", "anchored_residual"
 ]
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _VERSION = re.compile(r"n[0-9]{3}\Z")
 _FAMILIES = ("statistical", "tsfm", "combined", "atlas_overlay")
 _MATERIALIZER_KINDS = frozenset(
-    {"dictionary", "champion", "atlas", "bounded_overlay"}
+    {"dictionary", "champion", "atlas", "bounded_overlay", "anchored_residual"}
 )
 _RELEASE_KEYS = frozenset(
     {
@@ -203,6 +203,13 @@ class NumericalAlternativeSpec:
             recipe = parse_champion_recipe(dict(self.recipe_payload))
         except ChampionContractError as error:
             raise NumericalSupplyError("recipe_payload must be a Champion recipe") from error
+        if (
+            self.materializer_kind == "anchored_residual"
+            and recipe.kind != "bounded_overlay"
+        ):
+            _fail(
+                "anchored_residual materializers require a bounded_overlay recipe"
+            )
         if not isinstance(self.full_build_policy_payload, Mapping):
             _fail("full_build_policy_payload must be a mapping")
         full_policy = _parse_policy(

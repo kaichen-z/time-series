@@ -1,4 +1,8 @@
-"""Target-agnostic 8/32/80/20 successive-halving package phase runner."""
+"""Target-agnostic successive-halving package phase runner.
+
+The historical stage labels are retained for receipt compatibility, while the
+registered Train and Dev universes may have any non-zero size.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -37,12 +41,7 @@ _STAGE_ORDER: tuple[str, ...] = (
     "train80",
     "dev20",
 )
-_STAGE_SIZES: Mapping[str, int] = {
-    "screen8": 8,
-    "screen32": 32,
-    "train80": 80,
-    "dev20": 20,
-}
+_STAGE_NAMES: frozenset[str] = frozenset(_STAGE_ORDER)
 _PROMOTE_LIMITS: Mapping[str, int] = {
     "screen8": 2,
     "screen32": 1,
@@ -112,7 +111,7 @@ def _take_whole_groups(
 
 @dataclass(frozen=True)
 class PackageStageSchedule:
-    """Registered nested 8/32/80/20 universe with five-fold Train cross-fit."""
+    """Registered nested screening/Train/Dev universe with five-fold cross-fit."""
 
     seed: int
     screen8_ids: tuple[str, ...]
@@ -133,12 +132,16 @@ class PackageStageSchedule:
         for stage, ids in stages.items():
             if (
                 type(ids) is not tuple
-                or len(ids) != _STAGE_SIZES[stage]
+                or not ids
                 or tuple(sorted(ids)) != ids
                 or len(set(ids)) != len(ids)
                 or any(type(task_id) is not str or not task_id for task_id in ids)
             ):
                 raise PackageStageError(f"{stage} membership is not a registered set")
+        if len(self.screen8_ids) != min(8, len(self.train80_ids)):
+            raise PackageStageError("screen8 membership has the wrong registered size")
+        if len(self.screen32_ids) != min(32, len(self.train80_ids)):
+            raise PackageStageError("screen32 membership has the wrong registered size")
         if not set(self.screen8_ids) <= set(self.screen32_ids):
             raise PackageStageError("screen8 must nest inside screen32")
         if not set(self.screen32_ids) <= set(self.train80_ids):
@@ -164,17 +167,26 @@ class PackageStageSchedule:
             raise PackageStageError("stage schedule seed must be an exact integer")
         train = tuple(train_tasks)
         dev = tuple(dev_tasks)
-        if len(train) != 80 or any(type(task) is not DataTask for task in train):
-            raise PackageStageError("registered Train partition requires exactly 80 tasks")
-        if len(dev) != 20 or any(type(task) is not DataTask for task in dev):
-            raise PackageStageError("registered Dev partition requires exactly 20 tasks")
+        if not train or any(type(task) is not DataTask for task in train):
+            raise PackageStageError("registered Train partition must be nonempty")
+        if not dev or any(type(task) is not DataTask for task in dev):
+            raise PackageStageError("registered Dev partition must be nonempty")
+        train_ids = tuple(task.task_id for task in train)
+        dev_ids = tuple(task.task_id for task in dev)
+        if len(set(train_ids)) != len(train_ids) or len(set(dev_ids)) != len(dev_ids):
+            raise PackageStageError("registered split task IDs must be unique")
+        if not set(train_ids).isdisjoint(dev_ids):
+            raise PackageStageError("Dev must be disjoint from the Train partition")
         fold_manifest = build_group_fold_manifest(train, seed=seed, fold_count=5)
         group_order = _entity_group_order(train, seed)
-        screen32 = _take_whole_groups(group_order, 32, stage="screen32")
+        screen32_size = min(32, len(train))
+        screen32 = _take_whole_groups(group_order, screen32_size, stage="screen32")
         screen32_groups = tuple(
             group for group in group_order if set(group) <= set(screen32)
         )
-        screen8 = _take_whole_groups(screen32_groups, 8, stage="screen8")
+        screen8 = _take_whole_groups(
+            screen32_groups, min(8, len(train)), stage="screen8"
+        )
         return cls(
             seed=seed,
             screen8_ids=screen8,
@@ -186,10 +198,15 @@ class PackageStageSchedule:
 
     @property
     def counts(self) -> tuple[int, int, int, int]:
-        return (8, 32, 80, 20)
+        return (
+            len(self.screen8_ids),
+            len(self.screen32_ids),
+            len(self.train80_ids),
+            len(self.dev20_ids),
+        )
 
     def stage_ids(self, stage: str) -> tuple[str, ...]:
-        if stage not in _STAGE_SIZES:
+        if stage not in _STAGE_NAMES:
             raise PackageStageError(f"unknown stage {stage!r}")
         return {
             "screen8": self.screen8_ids,
@@ -245,7 +262,7 @@ class PackageStageEvidence:
     opened: bool
 
     def __post_init__(self) -> None:
-        if self.stage not in _STAGE_SIZES:
+        if self.stage not in _STAGE_NAMES:
             raise PackageStageError(f"stage evidence has unknown stage {self.stage!r}")
         if not isinstance(self.parent_evaluation, PackageEvaluation) or not isinstance(
             self.child_evaluation, PackageEvaluation

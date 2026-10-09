@@ -364,16 +364,19 @@ def _validated_split(
         raise ValueError(
             "split manifest is missing Train/Dev/Public membership"
         ) from error
-    if target_sizes != _FORMAL_COUNTS or actual_sizes != _FORMAL_COUNTS:
-        raise ValueError("split manifest must register exactly 80/20/99 tasks")
+    expected_sizes = {
+        "train": len(train), "dev": len(dev), "public_test": len(public)
+    }
+    if target_sizes != expected_sizes or actual_sizes != expected_sizes:
+        raise ValueError("split manifest sizes must match registered memberships")
     memberships = (train, dev, public)
     if any(
-        len(ids) != expected
+        not ids
         or len(ids) != len(set(ids))
         or any(type(task_id) is not str or not task_id for task_id in ids)
-        for ids, expected in zip(memberships, (80, 20, 99), strict=True)
+        for ids in memberships
     ):
-        raise ValueError("split manifest membership does not match 80/20/99")
+        raise ValueError("split manifest membership must be nonempty and unique")
     if any(
         set(left) & set(right)
         for index, left in enumerate(memberships)

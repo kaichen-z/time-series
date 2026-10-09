@@ -3919,9 +3919,9 @@ class RetrievalEvolutionEngine:
             raise RetrievalEvolutionError(
                 "configured generations exceed the remaining vNNN namespace"
             )
-        if len(train) != 80 or len(dev) != 20:
+        if not train or not dev:
             raise RetrievalEvolutionError(
-                "Retrieval evolution requires exactly 80 Train and 20 Dev tasks"
+                "Retrieval evolution requires nonempty Train and Dev partitions"
             )
         if any(not isinstance(task, ContextTask) for task in (*train, *dev)):
             raise RetrievalEvolutionError("all evolution cases must be ContextTask records")
