@@ -1,3 +1,5 @@
+> **SUPERSEDED — do not run.** See SUPERSEDED.md; a full-Train v5 package replaces this.
+
 # Reviewed TimesX / Time-MMD evolution package (protocol v3, package v4)
 
 - `drcik_aligned_evolve_v4.tgz` — complete package incl. frozen task packs (SHA256 `3b9403f4ac904dac0971ede586a8e1941d927ed62f7b72ce870a06e1bb84c025`), independently reviewed (17/17 model-free checks).
