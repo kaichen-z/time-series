@@ -21,6 +21,9 @@ inner = os.environ["SANDBOX_INNER"]; cdir = os.environ.get("SANDBOX_CODEX_DIR", 
 chome = os.environ["SANDBOX_CODEX_HOME"]; submit = os.environ["SANDBOX_SUBMIT"]
 cmd = ["bwrap", "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--new-session",
        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc"]
+# DNS: /etc/resolv.conf is usually a symlink into /run (systemd-resolved); mount only the resolver dir, read-only
+for p in ("/run/systemd/resolve", "/run/resolvconf"):
+    if os.path.isdir(p): cmd += ["--ro-bind", p, p]
 for p in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"):
     if os.path.islink(p): cmd += ["--symlink", os.readlink(p), p]
     elif os.path.isdir(p): cmd += ["--ro-bind", p, p]

@@ -1,0 +1,21 @@
+{
+ "seconds": 177,
+ "run_agent_rc": 0,
+ "codex_calls": 1,
+ "ledger": [
+  {
+   "kind": "commit",
+   "stage": "smoke",
+   "tokens": 300000,
+   "reported": false,
+   "rc": 1,
+   "turns": 0,
+   "gross_input": 0,
+   "cached_input": 0,
+   "output": 0
+  }
+ ],
+ "submissions": 0,
+ "results": [],
+ "episode_log_tail": "ker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest(\"http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)\")))\n2026-10-10T08:45:12.404907Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest(\"http/request failed: error sending request for url (https://chatgpt.com/backend-api/ps/mcp)\")))\n{\"type\":\"error\",\"message\":\"Reconnecting... 2/5 (workspace routing discovery failed)\"}\n{\"type\":\"error\",\"message\":\"Reconnecting... 3/5 (workspace routing discovery failed)\"}\n{\"type\":\"error\",\"message\":\"Reconnecting... 4/5 (workspace routing discovery failed)\"}\n{\"type\":\"error\",\"message\":\"Reconnecting... 5/5 (workspace routing discovery failed)\"}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Falling back from WebSockets to HTTPS transport. workspace routing discovery failed\"}}\n{\"type\":\"error\",\"message\":\"Reconnecting... 1/5 (workspace routing discovery failed)\"}\n{\"type\":\"error\",\"message\":\"Reconnecting... 2/5 (workspace routing discovery failed)\"}\n{\"type\":\"error\",\"message\":\"Reconnecting... 3/5 (workspace routing discovery failed)\"}\n{\"type\":\"error\",\"message\":\"Reconnecting... 4/5 (workspace routing discovery failed)\"}\n{\"type\":\"error\",\"message\":\"Reconnecting... 5/5 (workspace routing discovery failed)\"}\n{\"type\":\"error\",\"message\":\"workspace routing discovery failed\"}\n{\"type\":\"turn.failed\",\"error\":{\"message\":\"workspace routing discovery failed\"}}\n"
+}
