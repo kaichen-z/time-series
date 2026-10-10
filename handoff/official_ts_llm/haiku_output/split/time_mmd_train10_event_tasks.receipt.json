@@ -1,0 +1,43 @@
+{
+  "dataset": "time_mmd",
+  "document_count": 27,
+  "event_cards_sha256": "a5e7e34a57eda8c018beeefe5269ef1cca77bb82d5c09e48c33c08fa3ccffbc7",
+  "event_count": 27,
+  "group_count": 10,
+  "group_ids": [
+    "SocialGood:h8",
+    "Public_Health:h48",
+    "Security:h10",
+    "Climate:h6",
+    "Algriculture:h6",
+    "Economy:h6",
+    "Environment:h336",
+    "Climate:h12",
+    "Traffic:h8",
+    "Economy:h8"
+  ],
+  "manifest_sha256": "4cc43aa18d37d8ff3a1d32763f516603640b15c0ff5b9185b15ff7cd123ada0d",
+  "schema": "official-event-card-evolve-pilot-v1",
+  "seed": "official-event-card-pilot-v1:time_mmd",
+  "selection": "groups by sha256(seed\\0group), one Train task per group by task-id sha256",
+  "source_fingerprint": "91f1eae94470234fe0357b3af2b85b7383bb126b384731bc41c2618977cfe432",
+  "task_count": 10,
+  "task_ids": [
+    "official_81eefae0ca5ca2d3faeb6d64",
+    "official_64d64870606f1d8c2acf5a4b",
+    "official_0d2b2a7d0a4dfa851d4346a4",
+    "official_336b7c3c4193f445146247b9",
+    "official_8ff292e715631f4de911838e",
+    "official_95c07595a0349d6d07592280",
+    "official_ab70374b179e2c20f195ccee",
+    "official_f93dc86d16688f12372fcdcf",
+    "official_cdca6e28ee879fc9748b0848",
+    "official_82429e37589cb369b3b70ea1"
+  ],
+  "task_index_sha256": "13634add65b8cba38177a51094c1bbd89ee0d71762e969b014a6621cd926ca6a",
+  "tasks_sha256": "b96835e13d266943fd5870e136323aca2b00d5bce93e588a1cc22f4741ab48e9",
+  "uses_external_dev": false,
+  "uses_official_train_only": true,
+  "uses_test_ids_or_labels": false
+}
+

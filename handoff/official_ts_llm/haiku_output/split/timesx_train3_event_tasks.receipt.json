@@ -1,0 +1,29 @@
+{
+  "dataset": "timesx",
+  "document_count": 12,
+  "event_cards_sha256": "9ccf483f18715e619080aeb97d2766cf291891ad66802db795b7d27b74670922",
+  "event_count": 14,
+  "group_count": 3,
+  "group_ids": [
+    "SearchTrend:1W",
+    "Currency:1D",
+    "CommodityPrice:1D"
+  ],
+  "manifest_sha256": "4cc43aa18d37d8ff3a1d32763f516603640b15c0ff5b9185b15ff7cd123ada0d",
+  "schema": "official-event-card-evolve-pilot-v1",
+  "seed": "official-event-card-pilot-v1:timesx",
+  "selection": "groups by sha256(seed\\0group), one Train task per group by task-id sha256",
+  "source_fingerprint": "07e9a0eec359acd8f9f6fe0503f27d842119bf0bd303871b56cd483b6957b996",
+  "task_count": 3,
+  "task_ids": [
+    "official_b4c0abb5fdde2b356fa38ddb",
+    "official_ef2f937c85f52cc1a6f5f3ed",
+    "official_ca8ea8d8f95f976a7855527f"
+  ],
+  "task_index_sha256": "51a4818cdf01ecc16b51b6143dc03c495b59de36accf91b20d4ab1ea93ff41a6",
+  "tasks_sha256": "7df84b77e7eb86b60306c7629fda291aac35969cb42a353c8eb1e999199d45c5",
+  "uses_external_dev": false,
+  "uses_official_train_only": true,
+  "uses_test_ids_or_labels": false
+}
+

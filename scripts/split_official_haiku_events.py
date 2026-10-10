@@ -57,12 +57,15 @@ def validate_date(value: Any, *, context: str) -> None:
         raise ValueError(f"{context}: date must use canonical YYYY-MM-DD")
 
 
-def document_sets(root: Path) -> tuple[dict[str, set[str]], dict[str, dict[str, set[str]]]]:
+def document_sets(
+    root: Path,
+) -> tuple[dict[str, set[str]], dict[str, dict[str, set[str]]], dict[str, str]]:
     dataset_ids: dict[str, set[str]] = {"timesx": set(), "time_mmd": set()}
     split_ids: dict[str, dict[str, set[str]]] = {
         "timesx": defaultdict(set),
         "time_mmd": defaultdict(set),
     }
+    timesx_forecast_starts: dict[str, str] = {}
 
     timesx_path = root / "timesx_train_dev_documents.jsonl"
     for line_number, row in read_jsonl(timesx_path):
@@ -72,12 +75,18 @@ def document_sets(root: Path) -> tuple[dict[str, set[str]], dict[str, dict[str, 
         documents = row.get("documents")
         if not isinstance(documents, list):
             raise ValueError(f"{timesx_path}:{line_number}: documents must be a list")
+        future_timestamps = row.get("future_timestamps")
+        if not isinstance(future_timestamps, list) or not future_timestamps:
+            raise ValueError(f"{timesx_path}:{line_number}: future_timestamps must be nonempty")
+        forecast_start = str(future_timestamps[0])[:10]
+        validate_date(forecast_start, context=f"{timesx_path}:{line_number}:forecast_start")
         for index, document in enumerate(documents):
             if not isinstance(document, dict):
                 raise ValueError(f"{timesx_path}:{line_number}: documents[{index}] must be an object")
             document_id = require_id(document.get("document_id"), context=f"{timesx_path}:{line_number}")
             dataset_ids["timesx"].add(document_id)
             split_ids["timesx"][split].add(document_id)
+            timesx_forecast_starts[document_id] = forecast_start
 
     time_mmd_docs_path = root / "time_mmd_documents.jsonl"
     for line_number, row in read_jsonl(time_mmd_docs_path):
@@ -108,7 +117,7 @@ def document_sets(root: Path) -> tuple[dict[str, set[str]], dict[str, dict[str, 
     overlap = dataset_ids["timesx"] & dataset_ids["time_mmd"]
     if overlap:
         raise ValueError(f"benchmark document namespaces overlap ({len(overlap)} IDs)")
-    return dataset_ids, split_ids
+    return dataset_ids, split_ids, timesx_forecast_starts
 
 
 def validate_card(
@@ -189,7 +198,7 @@ def main() -> None:
     if sha256(source) != manifest.get("output_sha256"):
         raise ValueError("events.jsonl SHA-256 does not match manifest")
 
-    dataset_ids, split_ids = document_sets(args.handoff_root)
+    dataset_ids, split_ids, timesx_forecast_starts = document_sets(args.handoff_root)
     expected_ids = dataset_ids["timesx"] | dataset_ids["time_mmd"]
     rows_by_dataset: dict[str, list[dict[str, Any]]] = {"timesx": [], "time_mmd": []}
     valid_rows_by_dataset: dict[str, list[dict[str, Any]]] = {"timesx": [], "time_mmd": []}
@@ -208,6 +217,19 @@ def main() -> None:
             dataset = "time_mmd"
         else:
             raise ValueError(f"events:{line_number}: unknown document_id {document_id}")
+        if dataset == "timesx" and document_id.endswith("_scenario"):
+            forecast_start = timesx_forecast_starts[document_id]
+            for event_index, event in enumerate(row["events"]):
+                if event["time_start"] is not None and event["time_start"] >= forecast_start:
+                    row_errors.append({
+                        "document_id": document_id,
+                        "event_index": event_index,
+                        "kind": "future_scenario_event",
+                        "detail": (
+                            f"time_start={event['time_start']}; "
+                            f"forecast_start={forecast_start}"
+                        ),
+                    })
         for error in row_errors:
             error["dataset"] = dataset
         validation_errors.extend(row_errors)
