@@ -6,7 +6,7 @@ This transfers Dr-CiK's stage / episode / submission / acceptance BUDGET and SEL
 implementation (Numerical forecast.py, Retrieval retrieve.py, Decision adjust.py). The module semantics are adapted; it
 does NOT claim to reproduce Dr-CiK-specific configs (tl2 instructions, nrd4 calibration, validator) themselves.
 
-Protocol v5 (full official Train, anti-overfit), two pack split modes (build_pack.py --split):
+Protocol v6 (full official Train, anti-overfit), two pack split modes (build_pack.py --split):
   train_2to1: official Train split by whole isolation unit (TimesX entity group, Time-MMD domain) into F0 ~2/3 (agents)
               and F1 ~1/3 (host-only selection); official Dev = one-time final check after lock.
   all_train:  F0 = ALL official Train; F1 = official Dev (host-only selection); the final check on official Test needs
@@ -19,15 +19,15 @@ selectable; fail closed if none), locks the best, then (train_2to1 only) scores 
 Stages (episode = one synchronous round of one agent, <= 5 submissions; v3.3.2 rounds.py / sync_round.py):
   L4  group A: run L4_A with A1 numerical, A2 retrieval, A3 decision (shared notes, one champion);
       group B: independent runs L4_B1 / L4_B2 / L4_B3 (B1 numerical, B2 retrieval, B3 decision);
-      6 agents x 4 rounds = 24 episodes, <= 120 submissions. gain = BJT - jt, eps 1e-4.
+      6 agents x 4 rounds = 24 episodes, <= 120 submissions. gain = reference_jt - jt, eps 1e-4.
       group B champion = B run with the highest final F0 fitness (id asc on ties); the L5 seed = A or B champion by
       F0 fitness, tie -> B (v3.3.2 used the hidden fold here; v5 has none during evolution).
   L5  R1: S1 (single) + C1-C3 (shared) + I1-I3 (independent) = 7 agents x 4 rounds, Decision module only;
       routing: per (freq, H) cell the R1 champion with the best F0 mean gain (default: best overall);
       R2: R1-R3 (shared) x 4 rounds on F0, seed = routed function (v3.3.2 re-split folds here; v5 does not, as a
-      re-split would expose F1 tasks). 40 episodes, <= 200 submissions; gain = BJT - jt, eps 1e-4.
+      re-split would expose F1 tasks). 40 episodes, <= 200 submissions; gain = reference_jt - jt, eps 1e-4.
   L7  numerical-a -> decision-a -> numerical-b -> decision-b, 2 agents x 2 rounds per phase = 16 episodes, <= 80
-      submissions, one run, Retrieval frozen; gain = (BJT - jt) / mean BJT, eps 1e-5 (hevald_x.py).
+      submissions, one run, Retrieval frozen; gain = (reference_jt - jt) / mean reference_jt, eps 1e-5 (hevald_x.py).
 Isolation: every agent episode runs inside bubblewrap (sandbox_codex.py): RUN/private, packs, official data and the
 ledger are not mounted. Accounting: sol56 shim, gpt-5.6-sol + reasoning effort high, ledger per dataset, stage label
 <dataset>:<stage>. Failure rules (v3.3.2): an episode stops only by its 2 h timeout; a stage with > 5 % failed
@@ -43,6 +43,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import pipeline_runner as PR, viewstore  # noqa: E402
+import reference as REFERENCE  # noqa: E402
 from anon import anonymize  # noqa: E402
 P = argparse.ArgumentParser()
 P.add_argument("--dataset", choices=("timesx", "time_mmd"), required=True)
@@ -101,7 +102,10 @@ def f0_run_store(dst):
     """Fresh anonymised F0 store at dst (protocol v5) -> (handle_map {handle: tid}, eval_data keyed by handle)."""
     f0 = json.load(open(PACK / "private/eval_F0_feedback.json"))
     hmap = anonymize(PACK / "shared/store", f0["task_ids"], dst)
-    return hmap, dict(truth={h: f0["truth"][t] for h, t in hmap.items()}, base_jt={h: f0["base_jt"][t] for h, t in hmap.items()}, folds=[list(hmap)])
+    truth = {h: f0["truth"][t] for h, t in hmap.items()}
+    # protocol v6: the per-task baseline is the frozen Train-only reference, not Toto (pack base_jt kept as toto_jt)
+    return hmap, dict(truth=truth, base_jt=REFERENCE.reference_jt(dst, truth), toto_jt={h: f0["base_jt"][t] for h, t in hmap.items()},
+                      reference_sha256=REFERENCE.reference_sha256(), folds=[list(hmap)])
 
 
 def retrieval_coverage(store_dir, retrieve_f):
@@ -123,13 +127,14 @@ def prep_run(name, seeds, stage, fold_key="F0", roles=None, phased=False, role_t
     run = OUT / name
     if run.exists(): raise SystemExit(f"refusing to overwrite existing run dir {run} (use --resume / --restart-stage)")
     for s in ("shared/notes", "shared/skills", "shared/attempts", "shared/traces", "private", "queue", "results"): (run / s).mkdir(parents=True)
-    # Protocol v5: a run dir gets ONLY the F0 feedback tasks (view store + truth). F1 and the final check never enter a run dir.
+    # Protocol v6: a run dir gets ONLY the F0 feedback tasks (view store + truth). F1 and the final check never enter a run dir.
     # Fresh opaque row handles per run (no task/document ids, shuffled); handle map host-private.
     hmap, ed = f0_run_store(run / "shared/store")
     shutil.copy(HERE / "viewstore.py", run / "shared/store/viewstore.py")  # reader for agents (import viewstore from that dir)
     json.dump(hmap, open(run / "private/handle_map.json", "w")); json.dump(ed, open(run / "private/eval_data.json", "w"))
     for r in ROLES: shutil.copy(seeds[r], run / f"shared/best_{MOD[r]}.py"); (run / f"shared/{r}").mkdir()
     json.dump(dict(stage=name, fold_key=fold_key, **SCORING[stage], **({"roles": roles} if roles else {}),
+                   reference_sha256=ed["reference_sha256"],
                    forbidden_terms=json.load(open(PACK / "private/forbidden_terms.json"))), open(run / "stage.json", "w"), indent=1)
     if phased: json.dump(dict(phase="numerical"), open(run / "shared/phase.json", "w"))
     if roles: json.dump(roles, open(run / "shared/roles.json", "w"), indent=1)  # agent -> module (not secret; agents see it)
@@ -147,14 +152,16 @@ def prep_run(name, seeds, stage, fold_key="F0", roles=None, phased=False, role_t
     for t in vis: cells.setdefault(f"{V[t]['freq']}|H{V[t]['H']}", []).append(t)
     def agg(ts):
         ms = sorted(set.intersection(*[set(meth_err[t]) for t in ts]))
-        return dict(n=len(ts), mean_toto_joint_error=round(statistics.mean(ed["base_jt"][t] for t in ts), 3),
+        return dict(n=len(ts), mean_reference_joint_error=round(statistics.mean(ed["base_jt"][t] for t in ts), 3),
+                    mean_toto_joint_error=round(statistics.mean(ed["toto_jt"][t] for t in ts), 3),
                     mean_seed_gain=round(statistics.mean(ed["base_jt"][t] - seed_err[t] for t in ts), 3),
                     mean_method_joint_error={m: round(statistics.mean(meth_err[t][m] for t in ts), 3) for m in ms})
     summ = {c: (agg(ts) if len(ts) >= MIN_CELL else dict(n=len(ts), note=f"fewer than {MIN_CELL} visible tasks: withheld")) for c, ts in sorted(cells.items())}
     summ["ALL_VISIBLE"] = agg(sorted(vis))
     json.dump(summ, open(run / "shared/traces/visible_summary.json", "w"), indent=1)
     task = (HERE / "prompts/TASK_TEMPLATE.md").read_text()
-    gain_txt = ("relative gain = (Toto error - final error) / (mean Toto error)" if SCORING[stage]["scaled_gain"] else "gain = Toto error - final error")
+    gain_txt = ("relative gain = (reference error - final error) / (mean reference error)" if SCORING[stage]["scaled_gain"]
+                else "gain = reference error - final error")
     for k, v in dict(DATASET_NAME=NAME[DS], STAGE=name, DATASET_DESC=DESC[DS], ROLE_TEXT=role_text, NOTES_TEXT=notes_text, GAIN=gain_txt,
                      SUBMIT=str(HERE / "submit.py"), ROLE_ARG="<your role>").items():
         task = task.replace("{" + k + "}", v)

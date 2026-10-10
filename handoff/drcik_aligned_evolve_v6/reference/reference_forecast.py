@@ -1,7 +1,7 @@
-"""Seed Numerical module (protocol v6): the same Train-only rolling-CV-selected blend as the frozen reference
-(one weight vector over Toto / TimesFM / Moirai / Chronos-Bolt / seasonal-naive plus shrink-to-last per dataset x
-frequency).  Agents start from this program; the evolution score is measured against the reference, so a
-submission only gains by beating it.  forecast(view) -> list of H floats."""
+"""Protocol v6 frozen REFERENCE forecaster (host-side baseline of the evolution score).
+Pure numerical blend selected ONLY on official Train with forward-chaining (rolling-origin) CV, one weight vector
+and shrink-to-last per dataset x frequency (TABLE).  Missing members fall back to Toto.  Must not change during a
+run: its SHA-256 is recorded in stage.json and LOCK.json.  forecast(view) -> list of H floats."""
 
 MEMBERS = ("toto_2_0", "timesfm_2_5", "moirai_2_0", "chronos_bolt", "seasonal")
 TABLE = {

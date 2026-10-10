@@ -21,9 +21,9 @@ l7.write_text(l7.read_text() + "\n_PARENT = forecast\n_RULES = " + repr({repr(k)
               "    return list(_RULES[k]) if k in _RULES else _PARENT(view)\n")
 r = subprocess.run([sys.executable, str(HERE / "final_select.py"), "--out", str(A.out), "--pack", str(A.pack)], capture_output=True, text=True)
 lock = json.load(open(A.out / "final/LOCK.json")); acc = json.load(open(A.out / "final/access_log.json"))
-f1 = {row["candidate"]: row["robust_gain"] for row in lock["F1_table"]}
-orig = json.load(open(A.run_out / "final/LOCK.json")); f1_orig = {row["candidate"]: row["robust_gain"] for row in orig["F1_table"]}
-ok = (f1["L7"] <= f1_orig["L7"] + 1e-12 and lock["chosen"] == orig["chosen"]
+f1 = {row["candidate"]: row["mean_joint_error"] for row in lock["F1_table"]}
+orig = json.load(open(A.run_out / "final/LOCK.json")); f1_orig = {row["candidate"]: row["mean_joint_error"] for row in orig["F1_table"]}
+ok = (f1["L7"] >= f1_orig["L7"] - 1e-12 and lock["chosen"] == orig["chosen"]
       and acc == json.load(open(A.run_out / "final/access_log.json")) and acc["F1_opens"] == 1 and acc["locked"])
 res = dict(ok=ok, F1_identical=abs(f1["L7"] - f1_orig["L7"]) < 1e-12, F0_rules=len(keys), chosen=lock["chosen"], chosen_without_injection=orig["chosen"], F1_L7_injected=f1["L7"], F1_L7_original=f1_orig["L7"],
            access=acc, rc=r.returncode)

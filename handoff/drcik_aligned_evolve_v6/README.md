@@ -8,11 +8,11 @@ opening and records the manifest plus every fixed-module SHA-256 in `LOCK.json`.
 
 This package does not authorize a run. Existing v5 locks remain immutable, and official Test stays separately gated.
 
-> **Publication status (2026-10-10): candidate-pool fix validated; selection protocol not yet frozen.**
-> The six fixed candidates and their integrity checks have passed offline tests. However, TimesX Dev was already used
-> by v5, so the `all_train` F1/Dev selection described below must **not** be run again or represented as one-shot.
-> Before any real v6 run, replace/freeze that step with a Train-only internal hold-out or nested-CV selector and record
-> the reporting policy. The commands under “Real runs” are therefore documentary only and remain unauthorized.
+> **Protocol disclosure (2026-10-10): v6 is a second Dev selection, not a one-shot Dev experiment.**
+> TimesX Dev was already opened by v5, and v6 was designed after that result exposed a candidate-pool omission. Per the
+> project decision, v6 still uses the same Dev once for its final frozen-candidate selection. It must therefore be
+> reported as a second development selection; only the still-sealed official Test can provide the generalisation
+> confirmation. Stage 0 below uses Train labels only and does not erase or weaken this disclosure.
 
 Transfers the **stage / episode / submission budget** of the Dr-CiK pipeline (runsheet v3.3.2: L4 + L5 + L7,
 `gpt-5.6-sol`, reasoning effort high) to a three-module implementation (Numerical `forecast.py`, Retrieval
@@ -44,6 +44,23 @@ makes the raw foundation-model and simple-ensemble baselines mandatory final can
   `views_meta.json` = views + `{method: [offset, length]}`; `documents.json` = documents (deduplicated). The receipt
   records dtype/endianness/shape, 64 MB chunk SHA-256s, all file SHA-256s and the decode error (relative ≤ 6e-8).
 
+## Stage 0: frozen Train-only reference and seed
+
+Before evolution, `reference/select_seed_cv.py` searches 4,004 numerical configurations: simplex weights in steps of
+0.1 over Toto, TimesFM, Moirai, Chronos-Bolt and a cyclic seasonal-naive forecast, crossed with shrink-to-last values
+`{0, 0.1, 0.2, 0.3}`. It uses only F0/official Train labels. Forecast origins are divided into five chronological
+blocks; block 0 is not scored and the remaining **K=4 test blocks** are aggregated fold-macro (each nonempty block has
+equal weight, not each task). TimesX weekly has only three nonempty scored blocks. Time-MMD first draws a deterministic
+seed-0 sample of at most 1,500 tasks per `(frequency, horizon)`, records every selected task id, and then creates the
+chronological blocks. Exact ties retain the earlier fixed grid entry.
+
+The selected numerical program is frozen twice with identical forecast semantics: as the immutable host-side scoring
+reference (`reference/reference_forecast.py`) and as the agents' numerical seed (`seeds/seed_forecast.py`). Evolution
+keeps the Dr-CiK robust objective but measures gain relative to this strong frozen reference rather than Toto:
+`mean(reference_jt - program_jt) + 0.5 * mean(min(0, reference_jt - program_jt))`. The reference SHA is stored in every
+run's `stage.json`/private evaluation record and in the final lock; a reference change during final selection fails
+closed. CV evidence, fold sizes, sampled ids, selected weights and evidence hashes are frozen under `reference/`.
+
 ## What agents can see
 - A run dir holds only F0, as its own store `RUN/shared/store` keyed by **per-run opaque row handles** (`r_…`, fresh for
   every run dir and every host-side scoring call, shuffled; forecasts re-laid in that order); no task/document/group/series
@@ -63,9 +80,9 @@ series/group names in string literals; or base/final forecast within 1e-3 x Toto
 ## Stages (budget identical to v3.3.2)
 | Stage | Agents / rounds | Episodes / max submissions | Gain, eps |
 |---|---|---|---|
-| L4 | A1/A2/A3 = numerical/retrieval/decision (shared run); B1/B2/B3 same roles, independent runs; 4 rounds | 24 / 120 | BJT − jt, 1e-4 |
-| L5 | R1: S1 + C1–C3 + I1–I3 (decision only), 4 rounds; routing per (freq, H) cell on F0; R2: R1–R3, 4 rounds | 40 / 200 | BJT − jt, 1e-4 |
-| L7 | numerical-a, decision-a, numerical-b, decision-b; 2 agents x 2 rounds per phase; retrieval frozen | 16 / 80 | (BJT − jt)/mean BJT, 1e-5 |
+| L4 | A1/A2/A3 = numerical/retrieval/decision (shared run); B1/B2/B3 same roles, independent runs; 4 rounds | 24 / 120 | reference_jt − jt, 1e-4 |
+| L5 | R1: S1 + C1–C3 + I1–I3 (decision only), 4 rounds; routing per (freq, H) cell on F0; R2: R1–R3, 4 rounds | 40 / 200 | reference_jt − jt, 1e-4 |
+| L7 | numerical-a, decision-a, numerical-b, decision-b; 2 agents x 2 rounds per phase; retrieval frozen | 16 / 80 | (reference_jt − jt)/mean reference_jt, 1e-5 |
 
 Acceptance per synchronous round: F0 fitness > frozen round champion + eps (best eligible wins at round close). L4 stage
 seed = A or best B by F0, tie → B. Deviations from v3.3.2: no hidden fold during evolution (v3.3.2 gated on it) and no
@@ -75,8 +92,10 @@ v3.3.2; their "hidden" slot is a constant 0.
 ## Final selection (`final_select.py`)
 After L7, every frozen candidate (seed, 4 L4 runs, 5 L5-R1 runs, routed, L5-R2, L7) is run once on a freshly anonymised
 F1 store. Candidates with **any** F1 runtime error are not selectable; if none is error-free the selection **fails
-closed** (no LOCK, `SELECTION_FAILED.json`, final check never opened). Otherwise the best F1 robust gain (ties → earlier,
-seed first) is locked in `final/LOCK.json`. Then `train_2to1`: official Dev is scored once (`final/FINAL_dev.json`);
+closed** (no LOCK, `SELECTION_FAILED.json`, final check never opened). Otherwise the candidate with the **lowest mean
+joint error** is selected; exact ties retain the earlier candidate in the frozen order (the six host-pinned baselines
+come first). `LOCK.json` records mean joint error, robust/mean gain relative to the reference, better/worse counts and
+runtime errors for every candidate. Then `train_2to1`: official Dev is scored once (`final/FINAL_dev.json`);
 `all_train`: `final/FINAL_PENDING.json` (official Test needs a separate approval). `final/access_log.json` counts every
 label-file opening (expected F1 = 1; FINAL = 1 after lock, or 0 for `all_train`).
 
@@ -88,6 +107,7 @@ In `train_2to1` the units are very uneven (Time-MMD Environment = 65 % of Train)
 ## Files
 `build_pack.py` (packs), `viewstore.py` (float32 store), `anon.py` (opaque handles), `orchestrate.py` (stages, `--dry-run`, `--leak-test`, real runs),
 `evald.py` (evaluator daemon), `pipeline_runner.py`, `submit.py`, `run_agent.py`, `sandbox_codex.py`, `final_select.py`,
+`reference.py` and `reference/` (Stage-0 selection, frozen reference, manifest and CV evidence),
 `seeds/`, `prompts/TASK_TEMPLATE.md`, `rounds.py` / `sync_round.py` / `sol56_codex_shim.py` (v3.3.2),
 `tests/` (fake agents, leak probe, anti-memorisation, closure/storage proof, test sub-pack builder, group-rule and fail-closed tests, `cheat_samples/` =
 the 8 champions of the invalid run), `fixtures/` (frozen task→split indices of the official handoff), `packs/` (frozen).

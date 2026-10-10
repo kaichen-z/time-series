@@ -1,0 +1,182 @@
+{
+ "schema_version": 1,
+ "description": "Train-only rolling-origin CV reference (= v6 numerical seed)",
+ "table": {
+  "timesx": {
+   "daily": {
+    "weights": {
+     "toto_2_0": 0.6,
+     "timesfm_2_5": 0.0,
+     "moirai_2_0": 0.0,
+     "chronos_bolt": 0.3,
+     "seasonal": 0.1
+    },
+    "shrink": 0.3
+   },
+   "weekly": {
+    "weights": {
+     "toto_2_0": 0.0,
+     "timesfm_2_5": 0.6,
+     "moirai_2_0": 0.0,
+     "chronos_bolt": 0.0,
+     "seasonal": 0.4
+    },
+    "shrink": 0.0
+   }
+  },
+  "time_mmd": {
+   "daily": {
+    "weights": {
+     "toto_2_0": 0.0,
+     "timesfm_2_5": 0.6,
+     "moirai_2_0": 0.4,
+     "chronos_bolt": 0.0,
+     "seasonal": 0.0
+    },
+    "shrink": 0.0
+   },
+   "monthly": {
+    "weights": {
+     "toto_2_0": 0.3,
+     "timesfm_2_5": 0.7,
+     "moirai_2_0": 0.0,
+     "chronos_bolt": 0.0,
+     "seasonal": 0.0
+    },
+    "shrink": 0.0
+   },
+   "weekly": {
+    "weights": {
+     "toto_2_0": 0.0,
+     "timesfm_2_5": 0.9,
+     "moirai_2_0": 0.1,
+     "chronos_bolt": 0.0,
+     "seasonal": 0.0
+    },
+    "shrink": 0.0
+   }
+  }
+ },
+ "seed_equals_reference": true,
+ "aggregation": "fold-macro (equal weight per forward-chained fold), not task-micro",
+ "sampling": "fixed-seed (0) subsample per (frequency, horizon) drawn BEFORE blocking; sampled task ids in the CV evidence files",
+ "cv": {
+  "timesx": {
+   "members": [
+    "toto_2_0",
+    "timesfm_2_5",
+    "moirai_2_0",
+    "chronos_bolt",
+    "seasonal"
+   ],
+   "shrink_grid": [
+    0.0,
+    0.1,
+    0.2,
+    0.3
+   ],
+   "weight_step": 0.1,
+   "folds": 4,
+   "groups": {
+    "daily": {
+     "n_tasks": 1785,
+     "fold_test_sizes": [
+      355,
+      382,
+      382,
+      396
+     ],
+     "cv_mean_joint_error": {
+      "selected": 0.06151809512506236,
+      "toto": 0.06291413160343735,
+      "timesfm": 0.06472018429511907
+     },
+     "selection_rule": "argmin over grid of mean-over-folds out-of-sample mean joint error; ties -> lower grid index"
+    },
+    "weekly": {
+     "n_tasks": 279,
+     "fold_test_sizes": [
+      62,
+      155,
+      62
+     ],
+     "cv_mean_joint_error": {
+      "selected": 0.4391318646970615,
+      "toto": 0.702155365049839,
+      "timesfm": 0.4622489381581545
+     },
+     "selection_rule": "argmin over grid of mean-over-folds out-of-sample mean joint error; ties -> lower grid index"
+    }
+   }
+  },
+  "time_mmd": {
+   "members": [
+    "toto_2_0",
+    "timesfm_2_5",
+    "moirai_2_0",
+    "chronos_bolt",
+    "seasonal"
+   ],
+   "shrink_grid": [
+    0.0,
+    0.1,
+    0.2,
+    0.3
+   ],
+   "weight_step": 0.1,
+   "folds": 4,
+   "groups": {
+    "daily": {
+     "n_tasks": 6000,
+     "fold_test_sizes": [
+      1216,
+      1251,
+      1207,
+      1092
+     ],
+     "cv_mean_joint_error": {
+      "selected": 2.15095712057058,
+      "toto": 2.2651047900226544,
+      "timesfm": 2.163618384192444
+     },
+     "selection_rule": "argmin over grid of mean-over-folds out-of-sample mean joint error; ties -> lower grid index"
+    },
+    "monthly": {
+     "n_tasks": 6000,
+     "fold_test_sizes": [
+      1224,
+      1219,
+      1266,
+      1094
+     ],
+     "cv_mean_joint_error": {
+      "selected": 1.7958385817271454,
+      "toto": 1.926896823929512,
+      "timesfm": 1.8254111487392461
+     },
+     "selection_rule": "argmin over grid of mean-over-folds out-of-sample mean joint error; ties -> lower grid index"
+    },
+    "weekly": {
+     "n_tasks": 6000,
+     "fold_test_sizes": [
+      1239,
+      1217,
+      1253,
+      1038
+     ],
+     "cv_mean_joint_error": {
+      "selected": 1.4998724447205787,
+      "toto": 2.0053865744420047,
+      "timesfm": 1.5005256210638551
+     },
+     "selection_rule": "argmin over grid of mean-over-folds out-of-sample mean joint error; ties -> lower grid index"
+    }
+   }
+  }
+ },
+ "cv_evidence_sha256": {
+  "seed_cv_timesx.json": "298d08a9f1ce24cb20a32e173eccc0c3bf6f672ada90695e0009f79b69792fe4",
+  "seed_cv_time_mmd.json": "1d61e572b2168087e2ad8ff615885690832377833b092fd13f176d0c87a7cd76"
+ },
+ "reference_sha256": "27fce5005c1ae83f35bf1fd4a837afa62f391e924c5d042b569f747641c63bd9"
+}

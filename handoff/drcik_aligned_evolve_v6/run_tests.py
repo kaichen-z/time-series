@@ -49,6 +49,8 @@ for ds in A.datasets.split(","):
                                                                   *[x for f in forbid for x in ("--forbid", f)]]); results.append(rec)
     rec, _ = run(f"{ds}: run-dir closure proof (full-size F0 run dir)", [str(HERE / "tests/closure_proof.py"), "--pack", str(full), "--task-index", str(idx),
                                                                          "--run", str(w / "leak/leak/L4_A")]); results.append(rec)
+    rec, _ = run(f"{ds}: v6 baseline = frozen reference (not Toto) and seed == reference (full-size F0 run dir)",
+                 [str(HERE / "tests/test_reference_baseline.py"), "--run", str(w / "leak/leak/L4_A")]); results.append(rec)
     pack = w / "subpack"
     rec, _ = run(f"{ds}: build test sub-pack (n={A.n}/part)", [str(HERE / "tests/make_test_pack.py"), "--pack", str(full), "--out", str(pack), "--n", str(A.n)]); results.append(rec)
     rec, _ = run(f"{ds}: dry-run (sub-pack)", [str(HERE / "orchestrate.py"), "--dataset", ds, "--pack", str(pack), "--out", str(w / "dry"), "--dry-run"]); results.append(rec)

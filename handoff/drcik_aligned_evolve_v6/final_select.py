@@ -3,8 +3,9 @@
 
 After ALL stages are frozen:
   1. collect host-pinned raw/ensemble baselines plus every frozen candidate program (seed, L4/L5/L7 champions);
-  2. score each ONCE on F1 (candidates with any runtime error there are not selectable; fail closed if none):
-     robust gain = mean(BJT - jt) + 0.5 * mean(negative part); pick the max, ties -> the earlier candidate in the order above;
+  2. score each ONCE on F1 (candidates with any runtime error there are not selectable; fail closed if none), then select
+     the lowest mean joint error; exact ties keep the earlier candidate. Robust gain relative to the frozen reference is
+     recorded as a diagnostic, not used to choose the final candidate;
   3. write OUT/final/LOCK.json (chosen modules + SHA-256) - the program cannot change after this;
   4. split_mode train_2to1: only then open the official Dev labels and score the locked program ONCE (OUT/final/FINAL_dev.json).
      split_mode all_train: F1 IS official Dev; the final check would be official Test, which needs a separate approval and is NOT
@@ -20,6 +21,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent; sys.path.insert(0, str(HERE))
 import pipeline_runner as PR  # noqa: E402
 from anon import anonymize  # noqa: E402
+import reference as REFERENCE  # noqa: E402
 P = argparse.ArgumentParser(); P.add_argument("--out", type=Path, required=True); P.add_argument("--pack", type=Path, required=True)
 P.add_argument("--seeds", type=Path, default=HERE / "seeds", help="seed modules (tests may point elsewhere)")
 P.add_argument("--fixed-candidates", type=Path, default=HERE / "fixed_candidates"); A = P.parse_args()
@@ -57,8 +59,12 @@ class Fold:
     def score(self, mods, tag):
         out = FIN / f"_out_{tag}"
         fin, _, _, errs = PR.read_output(_run(mods, self.dir, out)); f = self.fold
-        g = [f["base_jt"][t] - jt(fin(h), f["truth"][t]) for h, t in self.hmap.items()]; shutil.rmtree(out)
-        return dict(robust_gain=robust(g), mean_gain=statistics.mean(g), better=sum(x > 1e-9 for x in g), worse=sum(x < -1e-9 for x in g),
+        if not hasattr(self, "ref"):  # frozen reference baseline on this fold (computed once, host-side)
+            self.ref = REFERENCE.reference_jt(self.dir, {h: f["truth"][t] for h, t in self.hmap.items()})
+        e = [jt(fin(h), f["truth"][t]) for h, t in self.hmap.items()]
+        g = [self.ref[h] - x for h, x in zip(self.hmap, e)]; shutil.rmtree(out)
+        return dict(mean_joint_error=statistics.mean(e), robust_gain_vs_reference=robust(g), mean_gain_vs_reference=statistics.mean(g),
+                    better_than_reference=sum(x > 1e-9 for x in g), worse_than_reference=sum(x < -1e-9 for x in g),
                     runtime_errors=len(errs), n=len(g))
 
     def close(self): shutil.rmtree(self.dir, ignore_errors=True)
@@ -95,6 +101,7 @@ def load_fixed(root):
 
 l4 = json.load(open(OUT / "receipts/L4.json")); s4 = mods(l4["final"])
 fixed, fixed_provenance = load_fixed(A.fixed_candidates)
+REF_SHA = REFERENCE.reference_sha256()
 cands = list(fixed)
 cands += [("seed", {r: A.seeds / f"seed_{MOD[r]}.py" for r in ROLES})]
 cands += [(f"L4:{n}", mods(n)) for n in ("L4_A", "L4_B1", "L4_B2", "L4_B3")]
@@ -118,10 +125,17 @@ if not ok_i:
               open(FIN / "SELECTION_FAILED.json", "w"), indent=1)
     access(FINAL_opened_after_lock=False, locked=False)
     raise SystemExit("final selection FAILED CLOSED: no error-free candidate on F1 (no lock, final check not opened)")
-best_i = max(ok_i, key=lambda i: (table[i][2]["robust_gain"], -i))
+# protocol v6: lowest mean joint error over ALL candidates (fixed baselines first, so exact ties keep the earlier one)
+best_i = min(ok_i, key=lambda i: (table[i][2]["mean_joint_error"], i))
 name, chosen, _ = table[best_i]
 for r, p in chosen.items(): shutil.copy(p, FIN / f"final_{MOD[r]}.py")
+if REFERENCE.reference_sha256() != REF_SHA:
+    json.dump(dict(status="FAILED_CLOSED", reason="reference forecaster changed during selection"), open(FIN / "SELECTION_FAILED.json", "w"), indent=1)
+    access(FINAL_opened_after_lock=False, locked=False)
+    raise SystemExit("final selection FAILED CLOSED: reference integrity changed")
 json.dump(dict(protocol_version=6, chosen=name, split_mode=SPLIT, fixed_candidates=fixed_provenance,
+               selection_rule="lowest mean joint error; runtime-error candidates excluded; ties -> earlier candidate",
+               reference_sha256=REF_SHA,
                modules_sha256={f"final_{MOD[r]}.py": sha(FIN / f"final_{MOD[r]}.py") for r in ROLES},
                F1_table=[dict(candidate=n, **s) for n, _, s in table], t=time.time()), open(FIN / "LOCK.json", "w"), indent=1)
 if SPLIT == "train_2to1":
@@ -134,4 +148,4 @@ else:
     json.dump(dict(locked=name, final_check="official Test", status=res, modules_sha256=json.load(open(FIN / "LOCK.json"))["modules_sha256"]),
               open(FIN / "FINAL_PENDING.json", "w"), indent=1)
     access(FINAL_opened_after_lock=False, locked=True)
-print(json.dumps(dict(chosen=name, split_mode=SPLIT, F1={n: round(s["robust_gain"], 5) for n, _, s in table}, FINAL=res)))
+print(json.dumps(dict(chosen=name, split_mode=SPLIT, F1={n: round(s["mean_joint_error"], 5) for n, _, s in table}, FINAL=res)))
