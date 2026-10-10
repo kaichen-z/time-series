@@ -7,7 +7,7 @@ two modules are the run's current shared best. Which role an agent may submit is
 
 Score (Dr-CiK v3.3.2 formulas per stage): per task gain = Toto joint error - final joint error (L4/L5) or the same
 divided by the mean Toto joint error (L7), joint error = sMAE + sRMSE each capped at 5; fitness = robust gain (mean +
-0.5 * mean negative part) over the F0 FEEDBACK tasks, the only tasks in a run dir (protocol v2). Synchronous rounds
+0.5 * mean negative part) over the F0 FEEDBACK tasks, the only tasks in a run dir (protocol v3). Synchronous rounds
 (SYNC_ROUNDS=1, sync_round.py): eligible iff F0 fitness > frozen round base + eps; winner at round close. F1 (final
 selection) and F2 (final test) are never available here; see final_select.py. Per-task numbers never leave private/; agents get fixed-precision aggregates only. usage: evald.py <run_dir> <budget_per_agent>"""
 import io, json, math, os, shutil, statistics, subprocess, sys, time, tokenize, traceback
@@ -16,19 +16,20 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent; sys.path.insert(0, str(HERE)); import sync_round as SR  # noqa: E402
 RUN = Path(sys.argv[1]).resolve(); BUDGET = int(sys.argv[2])
 STAGE = json.load(open(RUN / "stage.json")); ED = json.load(open(RUN / "private/eval_data.json"))
-# Protocol v2 (anti-overfit): the run dir holds truth for the F0 FEEDBACK tasks ONLY. F1 (selection) and F2 (final
+# Protocol v3 (anti-overfit): the run dir holds truth (keyed by per-run opaque row handles) for the F0 FEEDBACK tasks ONLY. F1 (selection) and F2 (final
 # test) never enter a run dir; they are scored host-side by final_select.py after every stage is frozen.
 FOLDS = ED["folds"]; assert len(FOLDS) == 1, "run eval_data must contain only the F0 feedback fold"; VIS = FOLDS[0]
 TRUTH, BJT = ED["truth"], ED["base_jt"]
 # v3.3.2 per-stage formulas: L4 coevolution/evald.py and L5 meta_harness/hevald.py use gain = BJT - jt (no scale), visible
-# eps 1e-4, hidden tolerance 1e-9; L7 coevo_x/hevald_x.py divides by the dataset's mean Toto joint error, eps 1e-5, tol 1e-6.
+# eps 1e-4; L7 coevo_x/hevald_x.py divides by the mean Toto joint error, eps 1e-5. (v3.3.2 hidden-fold tolerances are not used:
+# there is no hidden fold during evolution in protocol v3; the sync_round "hidden" slot is a constant 0.)
 SCALE = (sum(BJT[t] for t in VIS) / len(VIS)) if STAGE["scaled_gain"] else 1.0
 PEN, EPS = 0.5, STAGE["eps"]
 MOD = {"numerical": "forecast", "retrieval": "retrieve", "decision": "adjust"}
 SYNC = os.environ.get("SYNC_ROUNDS") == "1"
 
 
-# ---- anti-memorisation guards (v2; applied to agent submissions only, never to seeds) ----
+# ---- anti-memorisation guards (v3; applied to agent submissions only, never to seeds) ----
 MAX_BYTES, MAX_NUMBERS, MAX_STRING_CHARS = 20_000, 300, 2_000
 BANNED_NAMES = {"exec", "eval", "compile", "__import__", "open", "globals", "locals", "vars", "getattr", "setattr", "hash", "breakpoint", "input"}
 MAX_NUMBER_CHARS = 3_000

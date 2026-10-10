@@ -6,18 +6,24 @@ This transfers Dr-CiK's stage / episode / submission / acceptance BUDGET and SEL
 implementation (Numerical forecast.py, Retrieval retrieve.py, Decision adjust.py). The module semantics are adapted; it
 does NOT claim to reproduce Dr-CiK-specific configs (tl2 instructions, nrd4 calibration, validator) themselves.
 
-Stages (episode = one synchronous round of one agent, <= 5 submissions; v3.3.2 rounds.py / sync_round.py acceptance):
+Protocol v3 (anti-overfit): each pack's 80 official Train tasks = F0 feedback / F1 selection / F2 final test
+(whole-group, disjoint). Run dirs hold ONLY F0, keyed by per-run opaque row handles without task/document/group/series
+identity; agents get one quantised aggregate fitness + runtime-error count. Per-round acceptance on F0 only. After ALL
+stages are frozen, final_select.py scores every candidate (+ seed) once on F1 (erroring candidates not selectable; fail
+closed if none), locks the best, then scores F2 once.
+
+Stages (episode = one synchronous round of one agent, <= 5 submissions; v3.3.2 rounds.py / sync_round.py):
   L4  group A: run L4_A with A1 numerical, A2 retrieval, A3 decision (shared notes, one champion);
       group B: independent runs L4_B1 / L4_B2 / L4_B3 (B1 numerical, B2 retrieval, B3 decision);
-      6 agents x 4 rounds = 24 episodes, <= 120 submissions. gain = BJT - jt, eps 1e-4, hidden tol 1e-9.
-      group B champion = B run ranked by (final visible desc, final hidden desc, run id asc) [sync_round order];
-      L4 final = the group champion with the higher HIDDEN robust gain, tie -> B (runsheet v3.3.2 §3).
+      6 agents x 4 rounds = 24 episodes, <= 120 submissions. gain = BJT - jt, eps 1e-4.
+      group B champion = B run with the highest final F0 fitness (id asc on ties); the L5 seed = A or B champion by
+      F0 fitness, tie -> B (v3.3.2 used the hidden fold here; v3 has none during evolution).
   L5  R1: S1 (single) + C1-C3 (shared) + I1-I3 (independent) = 7 agents x 4 rounds, Decision module only;
-      routing: per (freq, H) cell the R1 champion with the best visible-fold mean gain (default: best overall);
-      R2: R1-R3 (shared) x 4 rounds on the SECONDARY whole-group folds (prep_mh2 semantics), seed = routed function.
-      40 episodes, <= 200 submissions; gain = BJT - jt, eps 1e-4, tol 1e-9. L5 final = R2 champion.
+      routing: per (freq, H) cell the R1 champion with the best F0 mean gain (default: best overall);
+      R2: R1-R3 (shared) x 4 rounds on F0, seed = routed function (v3.3.2 re-split folds here; v3 does not, as a
+      re-split would expose F1/F2 groups). 40 episodes, <= 200 submissions; gain = BJT - jt, eps 1e-4.
   L7  numerical-a -> decision-a -> numerical-b -> decision-b, 2 agents x 2 rounds per phase = 16 episodes, <= 80
-      submissions, one run, Retrieval frozen; gain = (BJT - jt) / mean BJT, eps 1e-5, tol 1e-6 (hevald_x.py).
+      submissions, one run, Retrieval frozen; gain = (BJT - jt) / mean BJT, eps 1e-5 (hevald_x.py).
 Isolation: every agent episode runs inside bubblewrap (sandbox_codex.py): RUN/private, packs, official data and the
 ledger are not mounted. Accounting: sol56 shim, gpt-5.6-sol + reasoning effort high, ledger per dataset, stage label
 <dataset>:<stage>. Failure rules (v3.3.2): an episode stops only by its 2 h timeout; a stage with > 5 % failed
@@ -46,8 +52,7 @@ DS = A.dataset; PACK = A.pack.resolve(); OUT = A.out.resolve()
 ROLES = ("numerical", "retrieval", "decision"); MOD = {"numerical": "forecast", "retrieval": "retrieve", "decision": "adjust"}
 PER, R4, R5, R7, FAIL_FRAC = 5, 4, 4, 2, 0.05
 MIN_CELL = 3  # minimum visible tasks per (freq,H) cell before per-method error means are shown
-SCORING = {"L4": dict(scaled_gain=False, eps=1e-4, hidden_tol=1e-9), "L5": dict(scaled_gain=False, eps=1e-4, hidden_tol=1e-9),
-           "L7": dict(scaled_gain=True, eps=1e-5, hidden_tol=1e-6)}
+SCORING = {"L4": dict(scaled_gain=False, eps=1e-4), "L5": dict(scaled_gain=False, eps=1e-4), "L7": dict(scaled_gain=True, eps=1e-5)}
 DESC = {
     "timesx": "Official TimesX (PostTime scope): commodity prices, FX rates and Google-search trends, history 96, horizon 12, daily/weekly. "
               "Documents per task: background, scenario (dated news events), holiday_info, covariates_info.",
@@ -96,7 +101,7 @@ def prep_run(name, seeds, stage, fold_key="F0", roles=None, phased=False, role_t
     run = OUT / name
     if run.exists(): raise SystemExit(f"refusing to overwrite existing run dir {run} (use --resume / --restart-stage)")
     for s in ("shared/notes", "shared/skills", "shared/attempts", "shared/traces", "private", "queue", "results"): (run / s).mkdir(parents=True)
-    # Protocol v2: a run dir gets ONLY the F0 feedback tasks (views + truth). F1/F2 never enter a run dir.
+    # Protocol v3: a run dir gets ONLY the F0 feedback tasks (views + truth). F1/F2 never enter a run dir.
     f0 = json.load(open(PACK / "private/eval_F0_feedback.json")); V_all = json.load(open(PACK / "shared/views_train.json"))
     # v3: fresh opaque row handles per run (no task/document ids, shuffled); handle map host-private
     from anon import anonymize
@@ -111,7 +116,7 @@ def prep_run(name, seeds, stage, fold_key="F0", roles=None, phased=False, role_t
     if roles: json.dump(roles, open(run / "shared/roles.json", "w"), indent=1)  # agent -> module (not secret; agents see it)
     ed = json.load(open(run / "private/eval_data.json")); vis = set(ed["folds"][0]); V = json.load(open(run / "shared/views_train.json"))
     o = run_pipeline({r: run / f"shared/best_{MOD[r]}.py" for r in ROLES}, run / "shared/views_train.json", run / "private/_seed_out.json")
-    # Anti-memorisation (v2): agents get NO per-task information (no truth, forecasts, per-task or per-method errors,
+    # Anti-memorisation (v3): agents get NO per-task information (no truth, forecasts, per-task or per-method errors,
     # task identities or rankings). Only aggregates over >= MIN_CELL visible tasks of a (freq,H) cell and over all
     # visible tasks, rounded to 3 decimals.
     cells = {}
@@ -167,7 +172,7 @@ def run_kwargs(stage, name, agents):
                     notes_text=SHARED_NOTES if len(agents) > 1 else INDEP_NOTES)
     if stage in ("L5_R1", "L5_R2"):
         return dict(stage="L5", roles={a: "decision" for a in agents}, role_text=ROLE_TEXT["decision"], notes_text=SHARED_NOTES if len(agents) > 1 else INDEP_NOTES,
-                    fold_key="F0")  # v2: R2 also evolves on F0 (a secondary re-split would expose F1/F2 groups)
+                    fold_key="F0")  # v3: R2 also evolves on F0 (a secondary re-split would expose F1/F2 groups)
     return dict(stage="L7", phased=True, role_text=ROLE_TEXT["phased"], notes_text=SHARED_NOTES)
 
 
@@ -180,8 +185,12 @@ def agent_env(stage, inner):
     for f in ("auth.json", "config.toml"):
         if (A.codex_home / f).exists() and not (chome / f).exists(): shutil.copy(A.codex_home / f, chome / f)
     inner = Path(inner).resolve()
-    # mount the whole native codex package dir (binary + vendored helpers) read-only; tests mount the script's dir
-    cdir = inner.parent if A.test_fake_codex or stage == "leak" else inner.parents[2]
+    if A.test_fake_codex or stage == "leak":
+        # test stand-ins are copied into an otherwise empty dir, so the sandbox mounts nothing else of the package
+        ib = OUT / "inner_bin"; ib.mkdir(exist_ok=True); shutil.copy(inner, ib / inner.name); (ib / inner.name).chmod(0o755)
+        inner = ib / inner.name; cdir = ib
+    else:
+        cdir = inner.parents[2]  # native codex package dir (binary + vendored helpers), read-only
     return dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", SOL56_ROOT=str(OUT), SOL56_STAGE=f"{DS}:{stage}", SOL56_REAL_CODEX=str(sb),
                 SANDBOX_INNER=str(inner), SANDBOX_CODEX_DIR=str(cdir), SANDBOX_CODEX_HOME=str(chome),
                 SANDBOX_SUBMIT=str(HERE / "submit.py"), SUBMIT_PY=str(HERE / "submit.py"))
@@ -290,7 +299,7 @@ def dry_run():
     rep["l7_phases"] = [[p, t, [a.split(":")[0] for a in ags]] for p, t, ags in L7_PHASES]
     rep["selection"] = dict(L4="group A = L4_A; group B = best of L4_B1..3 by (F0 desc, id asc); stage seed = higher F0, tie -> B",
                             L5="R1 -> per (freq,H) cell routing on F0 -> R2 on F0; stage seed = R2 champion", L7="L7 champion",
-                            final="final_select.py: every frozen stage candidate (+ seed) scored host-side on F1 once; best F1 locked; then F2 scored once")
+                            final="final_select.py: every frozen stage candidate (+ seed) scored host-side on F1 once (erroring candidates excluded; fail closed if none); best locked; then F2 scored once")
     rep["retrieval_seed_coverage"] = retrieval_coverage(PACK / "shared/views_train.json", SEEDS0["retrieval"])
     rep["pack"] = pack_summary(); rep["code_sha256"] = code_sha()
     rep["llm_calls"] = len(ledger()); assert rep["llm_calls"] == 0, "dry-run must not call any model"
@@ -349,7 +358,7 @@ def real_run():
         for n, a in PLAN["L4"]["runs"].items(): prep_run(n, SEEDS0, **run_kwargs("L4", n, a))
         say("L4 start"); parallel([lambda n=n, a=a: run_rounds(OUT / n, a, R4, R4 * PER, "L4") for n, a in PLAN["L4"]["runs"].items()])
         bchamp = sorted(["L4_B1", "L4_B2", "L4_B3"], key=lambda n: (-state(OUT / n)["best_visible"], n))[0]
-        # v2: no hidden fold during evolution -> A vs B by F0 fitness, tie -> B (F1 decides the FINAL program later)
+        # v3: no hidden fold during evolution -> A vs B by F0 fitness, tie -> B (F1 decides the FINAL program later)
         final4 = "L4_A" if state(OUT / "L4_A")["best_visible"] > state(OUT / bchamp)["best_visible"] else bchamp
         finish("L4", "L4", names4, dict(group_A="L4_A", group_B_champion=bchamp, final=final4,
                                         modules_sha256={r: sha(p) for r, p in modules(OUT / final4).items()}))
@@ -373,7 +382,7 @@ def real_run():
         begin("L7", ["L7"]); prep_run("L7", s5, **run_kwargs("L7", "L7", PLAN["L7"]["runs"]["L7"]))
         say("L7 start"); run_rounds(OUT / "L7", None, R7, R7 * PER, "L7", phases=L7_PHASES)
         finish("L7", "L7", ["L7"], dict(final="L7", modules_sha256={r: sha(p) for r, p in modules(OUT / "L7").items()}, code_sha256=code_sha()))
-    # v2: host-only final selection on F1 (once), lock, then F2 final test (once)
+    # v3: host-only final selection on F1 (once), lock, then F2 final test (once)
     if not (OUT / "final/LOCK.json").exists():
         r = subprocess.run([sys.executable, str(HERE / "final_select.py"), "--out", str(OUT), "--pack", str(PACK)], capture_output=True, text=True)
         if r.returncode != 0: raise SystemExit("final selection failed: " + r.stderr[-800:])

@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """Build the frozen task pack for the Dr-CiK-budget-aligned evolution on ONE official dataset.
 
-Dr-CiK runsheet v3.3.2 used 80 Train tasks and a 3-fold split of them (folds 0,1 VISIBLE, fold 2 HIDDEN) for every
-agent stage (L4, L5-R1, L7); L5-R2 re-split the same tasks with a new seed (prep_mh2). This script reproduces that
-structure on the official TimesX / Time-MMD Train partition:
-
-  * 80 official Train tasks, deterministic, whole-group 3-fold (no group in two folds), target sizes 27/27/26;
-  * primary folds (L4, L5-R1, L7) and secondary folds (L5-R2, different seed, same 80 tasks, whole-group);
-  * agent-visible views (NO labels, NO group_id): history, timestamps, frequency, horizon, target description,
-    frozen anchor forecasts (Toto/TimesFM/Moirai/Chronos/Granite where cached + the 5 frozen combined candidates),
-    official documents with the audited Haiku event cards attached;
-  * private truth + Toto reference errors, kept outside the agents' sandbox;
+Protocol v3 pack on the official TimesX / Time-MMD Train partition (Dr-CiK v3.3.2 budget, anti-overfit selection):
+  * 80 official Train tasks, deterministic, whole-group 3-fold (no group in two folds), target sizes 27/27/26:
+    F0 feedback (the only fold that enters agent run dirs), F1 selection (host-only, once, after all stages),
+    F2 final test (host-only, once, after the final program is locked); one private truth file per fold;
+  * views (NO labels): history, timestamps, frequency, horizon, a GENERIC target description (series/group identity
+    removed; names go to private/forbidden_terms.json for the static check), frozen anchor forecasts (Toto/TimesFM/
+    Moirai/Chronos/Granite where cached + the 5 frozen combined candidates), official documents with the audited Haiku
+    event cards; task/document ids are replaced by per-run opaque handles when a run dir is built (anon.py);
   * a receipt with every input SHA-256, coverage/fallback counts, fold task/group IDs and counts.
 
 Official Dev / sealed Test IDs, labels and event cards never enter the pack (asserted).
@@ -34,7 +32,7 @@ sys.path.insert(0, str(A.repo))
 from evolving_loop.official_benchmark_loader import load_official_timesx, load_official_time_mmd, load_anchor_cache  # noqa: E402
 
 DS = A.dataset; H_ = A.repo / "handoff/official_ts_llm"; ART = A.official_root / "artifacts/official_ts_alignment"
-SEED_PRIMARY, SEED_SECONDARY = f"drcik-aligned-v1:{DS}:primary", f"drcik-aligned-v1:{DS}:secondary"
+SEED_PRIMARY = f"drcik-aligned-v1:{DS}:primary"
 
 
 def sha(p):
@@ -108,11 +106,8 @@ def make_folds(seed, fixed_tasks=None):
 
 primary = make_folds(SEED_PRIMARY)
 chosen = {w.task_id: w for f in primary for w in f}
-secondary = make_folds(SEED_SECONDARY, fixed_tasks=set(chosen))
-if [{w.task_id for w in f} for f in secondary] == [{w.task_id for w in f} for f in primary]:
-    secondary = secondary[1:] + secondary[:1]  # only possible with 3 groups (TimesX): force a different hidden fold
 assert len(chosen) == A.tasks
-for F in (primary, secondary):
+for F in (primary,):
     gsets = [{w.group_id for w in f} for f in F]
     assert not (gsets[0] & gsets[1] or gsets[0] & gsets[2] or gsets[1] & gsets[2]), "group crosses folds"
     assert sum(len(f) for f in F) == A.tasks
@@ -148,7 +143,7 @@ for tid, w in sorted(chosen.items()):
                       documents=[dict(document_id=d.document_id, content=d.content, events=cards.get(d.document_id, [])) for d in w.documents])
     truth[tid] = list(w.truth); base_jt[tid] = jt(mf["toto_2_0"], truth[tid])
 
-# Protocol v2: series / group identity is removed from agent views (a generic target description), so programs cannot
+# Protocol v3: series / group identity is removed from agent views (a generic target description), so programs cannot
 # key rules on particular series or groups; the identifying names go to a private list used by the static check.
 import re as _re
 terms = set()
@@ -163,7 +158,7 @@ out = A.out; (out / "shared").mkdir(parents=True, exist_ok=True); (out / "privat
 json.dump(sorted(t for t in terms if len(t) >= 3), open(out / "private/forbidden_terms.json", "w"), indent=1)
 fold_ids = lambda F: [[w.task_id for w in f] for f in F]
 json.dump(views, open(out / "shared/views_train.json", "w"))
-# Protocol v2: one private file per fold so that F1 (selection) and F2 (final test) truth can be opened only by
+# Protocol v3: one private file per fold so that F1 (selection) and F2 (final test) truth can be opened only by
 # final_select.py (F2 only after the final program is locked). F0 is the agents' feedback fold.
 for i, name in enumerate(("F0_feedback", "F1_selection", "F2_final_test")):
     ids = [w.task_id for w in primary[i]]
@@ -171,17 +166,16 @@ for i, name in enumerate(("F0_feedback", "F1_selection", "F2_final_test")):
               open(out / f"private/eval_{name}.json", "w"))
 receipt = dict(
     schema="drcik-aligned-pack-v1", dataset=DS, uses_official_train_only=True, uses_external_dev=False, uses_test_ids_or_labels=False,
-    task_count=len(chosen), seeds=dict(primary=SEED_PRIMARY, secondary=SEED_SECONDARY),
+    task_count=len(chosen), seeds=dict(primary=SEED_PRIMARY),
     folds_primary=[dict(fold=i, role=("F0_feedback", "F1_selection", "F2_final_test")[i], n=len(f), task_ids=[w.task_id for w in f], group_ids=sorted({w.group_id for w in f})) for i, f in enumerate(primary)],
-    folds_secondary=[dict(fold=i, role="hidden" if i == 2 else "visible", n=len(f), task_ids=[w.task_id for w in f], group_ids=sorted({w.group_id for w in f})) for i, f in enumerate(secondary)],
     official_train_groups=len(groups), anchor_coverage={k: f"{v}/{len(chosen)}" for k, v in sorted(coverage.items())},
     documents=len(need), documents_missing_event_cards=len(missing_cards), events=sum(len(v) for v in cards.values()),
     reference="toto_2_0", internal_fitness="Toto-relative sMAE+sRMSE (cap 5), PEN 0.5, STD_W 0.25 (Dr-CiK v3.3.2)",
     input_sha256={k: sha(v) for k, v in sorted(inputs.items())}, source_fingerprint=parts.source_fingerprint,
-    protocol="v2: F0 feedback (agents, aggregate only) / F1 host-only selection after all stages / F2 final test once after lock",
+    protocol="v3: F0 feedback (agents; opaque per-run row handles; one quantised aggregate fitness) / F1 host-only selection once after all stages (fail closed) / F2 final test once after lock",
     output_sha256={"shared/views_train.json": sha(out / "shared/views_train.json"),
                    **{f"private/eval_{n}.json": sha(out / f"private/eval_{n}.json") for n in ("F0_feedback", "F1_selection", "F2_final_test")}})
 json.dump(receipt, open(out / "pack_receipt.json", "w"), indent=1)
-print(json.dumps(dict(dataset=DS, tasks=len(chosen), primary=[len(f) for f in primary], secondary=[len(f) for f in secondary],
+print(json.dumps(dict(dataset=DS, tasks=len(chosen), primary=[len(f) for f in primary],
                       groups_primary=[len(r["group_ids"]) for r in receipt["folds_primary"]], coverage=receipt["anchor_coverage"],
                       missing_cards=len(missing_cards), events=receipt["events"])))

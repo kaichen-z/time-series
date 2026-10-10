@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Protocol v2 final selection and test (host-only; agents never see F1/F2 or anything derived from them).
+"""Protocol v3 final selection and test (host-only; agents never see F1/F2 or anything derived from them).
 
 After ALL stages are frozen:
   1. collect every frozen candidate program (seed, each L4 run champion, the L4 stage seed, each L5-R1 run champion with the
@@ -13,7 +13,8 @@ usage: final_select.py --out OUT --pack PACK"""
 import argparse, hashlib, json, math, shutil, statistics, subprocess, sys, time
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
-P = argparse.ArgumentParser(); P.add_argument("--out", type=Path, required=True); P.add_argument("--pack", type=Path, required=True); A = P.parse_args()
+P = argparse.ArgumentParser(); P.add_argument("--out", type=Path, required=True); P.add_argument("--pack", type=Path, required=True)
+P.add_argument("--seeds", type=Path, default=HERE / "seeds", help="seed modules (tests may point elsewhere)"); A = P.parse_args()
 OUT, PACK = A.out.resolve(), A.pack.resolve(); FIN = OUT / "final"; FIN.mkdir(exist_ok=True)
 ROLES = ("numerical", "retrieval", "decision"); MOD = {"numerical": "forecast", "retrieval": "retrieve", "decision": "adjust"}
 LOG = dict(F1_opens=[], F2_opens=[])
@@ -52,15 +53,21 @@ def mods(run): return {r: OUT / run / f"shared/best_{MOD[r]}.py" for r in ROLES}
 
 
 l4 = json.load(open(OUT / "receipts/L4.json")); s4 = mods(l4["final"])
-cands = [("seed", {r: HERE / f"seeds/seed_{MOD[r]}.py" for r in ROLES})]
+cands = [("seed", {r: A.seeds / f"seed_{MOD[r]}.py" for r in ROLES})]
 cands += [(f"L4:{n}", mods(n)) for n in ("L4_A", "L4_B1", "L4_B2", "L4_B3")]
 cands += [(f"L5R1:{n}", dict(s4, decision=OUT / n / "shared/best_adjust.py")) for n in ("L5_S", "L5_C", "L5_I1", "L5_I2", "L5_I3")]
 cands += [("L5:routed", dict(s4, decision=OUT / "routed_adjust.py")), ("L5:R2", mods("L5_R2")), ("L7", mods("L7"))]
 f1 = open_fold("F1_selection")
 table = [(name, m, score(m, f1, f"F1_{i}")) for i, (name, m) in enumerate(cands)]
 del f1
-# pre-registered: a candidate with ANY runtime error on F1 (a module falling back silently) is not selectable
-ok_i = [i for i in range(len(table)) if table[i][2]["runtime_errors"] == 0] or [0]
+# pre-registered: a candidate with ANY runtime error on F1 (a module falling back silently) is not selectable.
+# If no candidate is error-free, FAIL CLOSED: nothing is selected, nothing is locked, F2 is never opened.
+ok_i = [i for i in range(len(table)) if table[i][2]["runtime_errors"] == 0]
+if not ok_i:
+    json.dump(dict(status="FAILED_CLOSED", reason="every F1 candidate has runtime errors", F1_table=[dict(candidate=n, **s) for n, _, s in table]),
+              open(FIN / "SELECTION_FAILED.json", "w"), indent=1)
+    json.dump(dict(F1_opens=len(LOG["F1_opens"]), F2_opens=0, F2_opened_after_lock=False, locked=False), open(FIN / "access_log.json", "w"), indent=1)
+    raise SystemExit("final selection FAILED CLOSED: no error-free candidate on F1 (no lock, F2 not opened)")
 best_i = max(ok_i, key=lambda i: (table[i][2]["robust_gain"], -i))
 name, chosen, _ = table[best_i]
 for r, p in chosen.items(): shutil.copy(p, FIN / f"final_{MOD[r]}.py")
@@ -69,5 +76,5 @@ json.dump(dict(chosen=name, modules_sha256={f"final_{MOD[r]}.py": sha(FIN / f"fi
 f2 = open_fold("F2_final_test")
 res = score({r: FIN / f"final_{MOD[r]}.py" for r in ROLES}, f2, "F2")
 json.dump(dict(locked=name, F2=res), open(FIN / "F2_final_test.json", "w"), indent=1)
-json.dump(dict(F1_opens=len(LOG["F1_opens"]), F2_opens=len(LOG["F2_opens"]), F2_opened_after_lock=True), open(FIN / "access_log.json", "w"), indent=1)
+json.dump(dict(F1_opens=len(LOG["F1_opens"]), F2_opens=len(LOG["F2_opens"]), F2_opened_after_lock=True, locked=True), open(FIN / "access_log.json", "w"), indent=1)
 print(json.dumps(dict(chosen=name, F1={n: round(s["robust_gain"], 5) for n, _, s in table}, F2=res)))

@@ -22,7 +22,7 @@ lock = json.load(open(A.out / "final/LOCK.json")); acc = json.load(open(A.out / 
 f1 = {row["candidate"]: row["robust_gain"] for row in lock["F1_table"]}
 orig = json.load(open(A.run_out / "final/LOCK.json")); f1_orig = {row["candidate"]: row["robust_gain"] for row in orig["F1_table"]}
 ok = (abs(f1["L7"] - f1_orig["L7"]) < 1e-12 and lock["chosen"] == orig["chosen"]
-      and acc == dict(F1_opens=1, F2_opens=1, F2_opened_after_lock=True))
+      and acc == dict(F1_opens=1, F2_opens=1, F2_opened_after_lock=True, locked=True))
 res = dict(ok=ok, chosen=lock["chosen"], chosen_without_injection=orig["chosen"], F1_L7_injected=f1["L7"], F1_L7_original=f1_orig["L7"],
            access=acc, rc=r.returncode)
 print(json.dumps(res, indent=1)); sys.exit(0 if ok else 1)

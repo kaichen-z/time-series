@@ -1,0 +1,132 @@
+{
+ "ok": true,
+ "passed": 17,
+ "total": 17,
+ "work": "/tmp/v4x_RY1A/work",
+ "results": [
+  {
+   "step": "timesx: dry-run",
+   "rc": 0,
+   "ok": true,
+   "seconds": 1,
+   "tail": "5173\n   ],\n   \"L5_I2\": [\n    4,\n    20,\n    -0.015173\n   ],\n   \"L5_I3\": [\n    4,\n    20,\n    -0.015173\n   ]\n  },\n  \"L5_R2\": {\n   \"L5_R2\": [\n    12,\n    60,\n    -0.015173\n   ]\n  },\n  \"L7\": {\n   \"L7\": [\n    16,\n    80,\n    -0.269488\n   ]\n  }\n },\n \"retrieval_seed_coverage\": {\n  \"tasks\": 80,\n  \"event_bearing_tasks\": 79,\n  \"events\": 433,\n  \"eligible_events\": 353,\n  \"nonempty_correction_tasks\": 74,\n  \"corrections\": 134,\n  \"fallback_tasks_with_eligible_events_but_no_correction\": 2,\n  \"kinds\": {\n   \"recent\": 134\n  }\n },\n \"llm_calls\": 0,\n \"report\": \"/tmp/v4x_RY1A/work/timesx/dry/dry_run_report.json\"\n}\n"
+  },
+  {
+   "step": "timesx: closure/split proof",
+   "rc": 0,
+   "ok": true,
+   "seconds": 0,
+   "tail": " {\n  \"F0_feedback\": 27,\n  \"F1_selection\": 27,\n  \"F2_final_test\": 26\n },\n \"groups\": {\n  \"F0_feedback\": 1,\n  \"F1_selection\": 1,\n  \"F2_final_test\": 1\n },\n \"checks\": {\n  \"tasks_pairwise_disjoint\": true,\n  \"groups_pairwise_disjoint\": true,\n  \"union_equals_pack_80\": true,\n  \"all_official_train\": true,\n  \"no_dev_or_test_ids\": true,\n  \"truth_files_match_ids\": true,\n  \"pack_views_single_target_description\": true,\n  \"run_dir_views_only_F0\": true,\n  \"run_dir_truth_only_F0\": true,\n  \"run_dir_opaque_handles\": true,\n  \"run_dir_no_identity_keys\": true,\n  \"run_dir_opaque_document_ids\": true\n },\n \"ok\": true\n}\n"
+  },
+  {
+   "step": "timesx: sandbox leak test",
+   "rc": 0,
+   "ok": true,
+   "seconds": 0,
+   "tail": "A/stage.json\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs/timesx/private/eval_F1_selection.json\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs/timesx/private/eval_F2_final_test.json\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs/timesx\",\n  \"/tmp/v4x_RY1A/work/timesx/leak/ledger\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/build_pack.py\",\n  \"/home/yiqi/.codex\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs/timesx/private\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/fixtures\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/tests/cheat_samples\",\n  \"/home/yiqi/.codex\"\n ]\n}\n"
+  },
+  {
+   "step": "timesx: anti-memorisation + identity probe + 4 old champions",
+   "rc": 0,
+   "ok": true,
+   "seconds": 55,
+   "tail": "onse\": \"{\\\"eligible\\\": true, \\\"round\\\": null, \\\"feedback_fitness\\\": -0.015, \\\"runtime_errors\\\": 0, \\\"budget_left\\\": 988}\"\n  },\n  \"v3_identity\": {\n   \"single_handle_probe_fields\": [\n    \"budget_left\",\n    \"eligible\",\n    \"feedback_fitness\",\n    \"round\",\n    \"runtime_errors\"\n   ],\n   \"only_allowed_fields\": true,\n   \"fitness_quantised\": true,\n   \"handles_disjoint_across_runs\": true,\n   \"doc_ids_disjoint_across_runs\": true,\n   \"order_differs\": true,\n   \"no_real_task_ids_in_views\": true,\n   \"no_identity_keys_in_views\": true,\n   \"single_target_description\": true\n  }\n },\n \"agent_visible_leaks\": []\n}\n"
+  },
+  {
+   "step": "timesx: fake-agent end-to-end (L4-L5-L7-final)",
+   "rc": 0,
+   "ok": true,
+   "seconds": 256,
+   "tail": ""
+  },
+  {
+   "step": "timesx: F1 opened once, F2 once after lock",
+   "ok": true,
+   "access": {
+    "F1_opens": 1,
+    "F2_opens": 1,
+    "F2_opened_after_lock": true,
+    "locked": true
+   }
+  },
+  {
+   "step": "timesx: group-specific rule gains nothing on F1",
+   "rc": 0,
+   "ok": true,
+   "seconds": 1,
+   "tail": "{\n \"ok\": true,\n \"chosen\": \"L5R1:L5_C\",\n \"chosen_without_injection\": \"L5R1:L5_C\",\n \"F1_L7_injected\": -0.025244990108613804,\n \"F1_L7_original\": -0.025244990108613804,\n \"access\": {\n  \"F1_opens\": 1,\n  \"F2_opens\": 1,\n  \"F2_opened_after_lock\": true,\n  \"locked\": true\n },\n \"rc\": 0\n}\n"
+  },
+  {
+   "step": "timesx: final selection fails closed",
+   "rc": 0,
+   "ok": true,
+   "seconds": 2,
+   "tail": "access\": {\n   \"F1_opens\": 1,\n   \"F2_opens\": 0,\n   \"F2_opened_after_lock\": false,\n   \"locked\": false\n  }\n },\n \"seed_error\": {\n  \"ok\": true,\n  \"chosen\": \"L5R1:L5_C\",\n  \"access\": {\n   \"F1_opens\": 1,\n   \"F2_opens\": 1,\n   \"F2_opened_after_lock\": true,\n   \"locked\": true\n  }\n },\n \"partial\": {\n  \"ok\": true,\n  \"chosen\": \"L5:R2\",\n  \"erroring_candidates\": [\n   \"L4:L4_A\",\n   \"L4:L4_B2\",\n   \"L5:routed\",\n   \"L5R1:L5_C\",\n   \"L5R1:L5_I1\",\n   \"L5R1:L5_I2\",\n   \"L5R1:L5_I3\",\n   \"L5R1:L5_S\",\n   \"L7\"\n  ],\n  \"access\": {\n   \"F1_opens\": 1,\n   \"F2_opens\": 1,\n   \"F2_opened_after_lock\": true,\n   \"locked\": true\n  }\n }\n}\n"
+  },
+  {
+   "step": "time_mmd: dry-run",
+   "rc": 0,
+   "ok": true,
+   "seconds": 1,
+   "tail": "00065\n   ],\n   \"L5_I2\": [\n    4,\n    20,\n    -0.00065\n   ],\n   \"L5_I3\": [\n    4,\n    20,\n    -0.00065\n   ]\n  },\n  \"L5_R2\": {\n   \"L5_R2\": [\n    12,\n    60,\n    -0.00065\n   ]\n  },\n  \"L7\": {\n   \"L7\": [\n    16,\n    80,\n    -0.000358\n   ]\n  }\n },\n \"retrieval_seed_coverage\": {\n  \"tasks\": 80,\n  \"event_bearing_tasks\": 72,\n  \"events\": 304,\n  \"eligible_events\": 253,\n  \"nonempty_correction_tasks\": 71,\n  \"corrections\": 230,\n  \"fallback_tasks_with_eligible_events_but_no_correction\": 0,\n  \"kinds\": {\n   \"recent\": 230\n  }\n },\n \"llm_calls\": 0,\n \"report\": \"/tmp/v4x_RY1A/work/time_mmd/dry/dry_run_report.json\"\n}\n"
+  },
+  {
+   "step": "time_mmd: closure/split proof",
+   "rc": 0,
+   "ok": true,
+   "seconds": 0,
+   "tail": "  \"F0_feedback\": 27,\n  \"F1_selection\": 27,\n  \"F2_final_test\": 26\n },\n \"groups\": {\n  \"F0_feedback\": 12,\n  \"F1_selection\": 12,\n  \"F2_final_test\": 12\n },\n \"checks\": {\n  \"tasks_pairwise_disjoint\": true,\n  \"groups_pairwise_disjoint\": true,\n  \"union_equals_pack_80\": true,\n  \"all_official_train\": true,\n  \"no_dev_or_test_ids\": true,\n  \"truth_files_match_ids\": true,\n  \"pack_views_single_target_description\": true,\n  \"run_dir_views_only_F0\": true,\n  \"run_dir_truth_only_F0\": true,\n  \"run_dir_opaque_handles\": true,\n  \"run_dir_no_identity_keys\": true,\n  \"run_dir_opaque_document_ids\": true\n },\n \"ok\": true\n}\n"
+  },
+  {
+   "step": "time_mmd: sandbox leak test",
+   "rc": 0,
+   "ok": true,
+   "seconds": 0,
+   "tail": "on\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs/time_mmd/private/eval_F1_selection.json\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs/time_mmd/private/eval_F2_final_test.json\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs/time_mmd\",\n  \"/tmp/v4x_RY1A/work/time_mmd/leak/ledger\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/build_pack.py\",\n  \"/home/yiqi/.codex\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/packs/time_mmd/private\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/fixtures\",\n  \"/tmp/v4x_RY1A/drcik_aligned_evolve/tests/cheat_samples\",\n  \"/home/yiqi/.codex\"\n ]\n}\n"
+  },
+  {
+   "step": "time_mmd: anti-memorisation + identity probe + 4 old champions",
+   "rc": 0,
+   "ok": true,
+   "seconds": 55,
+   "tail": "ponse\": \"{\\\"eligible\\\": true, \\\"round\\\": null, \\\"feedback_fitness\\\": 0.009, \\\"runtime_errors\\\": 0, \\\"budget_left\\\": 988}\"\n  },\n  \"v3_identity\": {\n   \"single_handle_probe_fields\": [\n    \"budget_left\",\n    \"eligible\",\n    \"feedback_fitness\",\n    \"round\",\n    \"runtime_errors\"\n   ],\n   \"only_allowed_fields\": true,\n   \"fitness_quantised\": true,\n   \"handles_disjoint_across_runs\": true,\n   \"doc_ids_disjoint_across_runs\": true,\n   \"order_differs\": true,\n   \"no_real_task_ids_in_views\": true,\n   \"no_identity_keys_in_views\": true,\n   \"single_target_description\": true\n  }\n },\n \"agent_visible_leaks\": []\n}\n"
+  },
+  {
+   "step": "time_mmd: fake-agent end-to-end (L4-L5-L7-final)",
+   "rc": 0,
+   "ok": true,
+   "seconds": 256,
+   "tail": ""
+  },
+  {
+   "step": "time_mmd: F1 opened once, F2 once after lock",
+   "ok": true,
+   "access": {
+    "F1_opens": 1,
+    "F2_opens": 1,
+    "F2_opened_after_lock": true,
+    "locked": true
+   }
+  },
+  {
+   "step": "time_mmd: group-specific rule gains nothing on F1",
+   "rc": 0,
+   "ok": true,
+   "seconds": 1,
+   "tail": "{\n \"ok\": true,\n \"chosen\": \"L7\",\n \"chosen_without_injection\": \"L7\",\n \"F1_L7_injected\": 0.42620229579997215,\n \"F1_L7_original\": 0.42620229579997215,\n \"access\": {\n  \"F1_opens\": 1,\n  \"F2_opens\": 1,\n  \"F2_opened_after_lock\": true,\n  \"locked\": true\n },\n \"rc\": 0\n}\n"
+  },
+  {
+   "step": "time_mmd: final selection fails closed",
+   "rc": 0,
+   "ok": true,
+   "seconds": 2,
+   "tail": " 1,\n  \"access\": {\n   \"F1_opens\": 1,\n   \"F2_opens\": 0,\n   \"F2_opened_after_lock\": false,\n   \"locked\": false\n  }\n },\n \"seed_error\": {\n  \"ok\": true,\n  \"chosen\": \"L7\",\n  \"access\": {\n   \"F1_opens\": 1,\n   \"F2_opens\": 1,\n   \"F2_opened_after_lock\": true,\n   \"locked\": true\n  }\n },\n \"partial\": {\n  \"ok\": true,\n  \"chosen\": \"L5:R2\",\n  \"erroring_candidates\": [\n   \"L4:L4_A\",\n   \"L4:L4_B2\",\n   \"L5:routed\",\n   \"L5R1:L5_C\",\n   \"L5R1:L5_I1\",\n   \"L5R1:L5_I2\",\n   \"L5R1:L5_I3\",\n   \"L5R1:L5_S\",\n   \"L7\"\n  ],\n  \"access\": {\n   \"F1_opens\": 1,\n   \"F2_opens\": 1,\n   \"F2_opened_after_lock\": true,\n   \"locked\": true\n  }\n }\n}\n"
+  },
+  {
+   "step": "package bytes unchanged by the test run",
+   "ok": true,
+   "files": 48
+  }
+ ],
+ "package_sha256_manifest": "b682c6e7a90f495b6aa129d440c50143b26998559ff6380e92a47b02d6fdca9e"
+}

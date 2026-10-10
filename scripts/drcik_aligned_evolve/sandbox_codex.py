@@ -4,7 +4,7 @@
   * the codex installation read-only and a per-run CODEX_HOME (auth/config copy) read-write;
   * RUN/shared and RUN/queue read-write, RUN/results read-only, the agent's own workspace RUN/ws_<id> read-write;
   * submit.py read-only.
-RUN/private (truth, hidden folds, daemon state), the task packs, the official data repositories, the ledger and every
+RUN/private (F0 truth, row-handle map, daemon state), the task packs, the official data repositories, the ledger and every
 other path on the host are NOT mounted, so they cannot be read. The sol56 shim (outside the sandbox) calls this file as
 SOL56_REAL_CODEX; argv is the codex argv. Env: SANDBOX_INNER (binary to run inside), SANDBOX_CODEX_DIR (install dir to
 mount), SANDBOX_CODEX_HOME, SANDBOX_SUBMIT."""
