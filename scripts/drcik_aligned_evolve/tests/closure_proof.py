@@ -22,11 +22,15 @@ checks["union_equals_pack_80"] = set().union(*ids.values()) == set(V) and len(V)
 checks["all_official_train"] = all(split.get(t) == "train" for t in V)
 checks["no_dev_or_test_ids"] = not any(split.get(t) == "dev" for t in V) and rec["uses_test_ids_or_labels"] is False
 checks["truth_files_match_ids"] = all(set(f["truth"]) == ids[n] == set(f["base_jt"]) for n, f in F.items())
-checks["views_have_no_identity"] = len({v["target_description"] for v in V.values()}) == 1 and all("group_id" not in v for v in V.values())
+checks["pack_views_single_target_description"] = len({v["target_description"] for v in V.values()}) == 1
 if A.run:
     rv = json.load(open(A.run / "shared/views_train.json")); re_ = json.load(open(A.run / "private/eval_data.json"))
-    checks["run_dir_views_only_F0"] = set(rv) == ids["F0_feedback"]
-    checks["run_dir_truth_only_F0"] = set(re_["truth"]) == ids["F0_feedback"] and len(re_["folds"]) == 1
+    hm = json.load(open(A.run / "private/handle_map.json")); txt = (A.run / "shared/views_train.json").read_text()
+    checks["run_dir_views_only_F0"] = set(hm.values()) == ids["F0_feedback"] and set(rv) == set(hm)
+    checks["run_dir_truth_only_F0"] = set(re_["truth"]) == set(hm) and len(re_["folds"]) == 1
+    checks["run_dir_opaque_handles"] = all(h.startswith("r_") for h in rv) and not any(t in txt for t in V)
+    checks["run_dir_no_identity_keys"] = not any(k in v for v in rv.values() for k in ("tid", "task_id", "group_id", "entity_name"))
+    checks["run_dir_opaque_document_ids"] = all(d["document_id"].startswith("d_") for v in rv.values() for d in v["documents"])
 out = dict(dataset=rec["dataset"], counts={n: len(s) for n, s in ids.items()}, groups={n: len(g) for n, g in groups.items()},
            checks=checks, ok=all(checks.values()))
 print(json.dumps(out, indent=1)); raise SystemExit(0 if out["ok"] else 1)

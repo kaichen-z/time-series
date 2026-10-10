@@ -3,16 +3,16 @@
  "runs": {
   "L4_A": {
    "submissions": 24,
-   "best_F0": 0.010322705506925184,
+   "best_F0": 0.06853425893918083,
    "used": {
-    "A2": 8,
+    "A1": 8,
     "A3": 8,
-    "A1": 8
+    "A2": 8
    }
   },
   "L4_B1": {
    "submissions": 8,
-   "best_F0": 0.010322705506925184,
+   "best_F0": 0.06471094019668139,
    "used": {
     "B1": 8
    }
@@ -39,9 +39,9 @@
  "net_tokens": 20400,
  "group_A": "L4_A",
  "group_B_champion": "L4_B1",
- "final": "L4_B1",
+ "final": "L4_A",
  "modules_sha256": {
-  "numerical": "d418d87d117ca0fad4236fa2953d99d6d0982e32b1cf815069457f3c503f2220",
+  "numerical": "5a7102d2cb9fc6dd0bdb107c95e7a754989afb4e9cb0e0b99508713602dd0331",
   "retrieval": "d4970de1259fab09785e2459d54ed0ba72d954722234252b5a10f8d747062627",
   "decision": "13f82eb5cae9abd4f886c3a266687266cf796eab1e6dcc0426b5448bd5a24d24"
  },

@@ -3,37 +3,37 @@
  "runs": {
   "L5_S": {
    "submissions": 8,
-   "best_F0": 0.010322705506925184,
+   "best_F0": -0.010525031567346995,
    "used": {
     "S1": 8
    }
   },
   "L5_C": {
    "submissions": 24,
-   "best_F0": 0.010322705506925184,
+   "best_F0": -0.009906346521118714,
    "used": {
+    "C1": 8,
     "C2": 8,
-    "C3": 8,
-    "C1": 8
+    "C3": 8
    }
   },
   "L5_I1": {
    "submissions": 8,
-   "best_F0": 0.010322705506925184,
+   "best_F0": -0.011628160971807532,
    "used": {
     "I1": 8
    }
   },
   "L5_I2": {
    "submissions": 8,
-   "best_F0": 0.010322705506925184,
+   "best_F0": -0.010317338342758718,
    "used": {
     "I2": 8
    }
   },
   "L5_I3": {
    "submissions": 8,
-   "best_F0": 0.010322705506925184,
+   "best_F0": -0.010962189370319494,
    "used": {
     "I3": 8
    }
@@ -46,17 +46,10 @@
  "net_tokens": 23800,
  "routing": {
   "route": {
-   "daily|H192": "L5_S",
-   "monthly|H10": "L5_S",
-   "monthly|H6": "L5_S",
-   "monthly|H8": "L5_S",
-   "weekly|H12": "L5_S",
-   "weekly|H24": "L5_S",
-   "weekly|H36": "L5_S",
-   "weekly|H48": "L5_S"
+   "1D|H12": "L5_C"
   },
-  "default": "L5_S"
+  "default": "L5_C"
  },
- "routed_sha256": "886ca7fbd76933b03b5e89ff95f81054144c4582f12b534a13d09e8f599639ed",
+ "routed_sha256": "e68325cb6ba358fa38d9b59f79f2af0f74c0727854f7e727e2aca2c74ffdfe3a",
  "stop": null
 }

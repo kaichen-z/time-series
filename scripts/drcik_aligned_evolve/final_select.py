@@ -4,7 +4,7 @@
 After ALL stages are frozen:
   1. collect every frozen candidate program (seed, each L4 run champion, the L4 stage seed, each L5-R1 run champion with the
      L4 numerical/retrieval modules, the routed L5 function, the L5-R2 champion, the L7 champion);
-  2. score each ONCE on F1 (selection groups, never seen during evolution): robust gain = mean(BJT - jt) + 0.5 *
+  2. score each ONCE on F1 (candidates with any runtime error there are not selectable) (selection groups, never seen during evolution): robust gain = mean(BJT - jt) + 0.5 *
      mean(negative part); pick the max, ties -> the earlier/simpler candidate in the order above (seed first);
   3. write OUT/final/LOCK.json (chosen modules + SHA-256) - the program cannot change after this;
   4. only then open F2 and score the locked program ONCE; write OUT/final/F2_final_test.json.
@@ -39,11 +39,12 @@ def open_fold(name):
 
 
 def score(mods, fold, tag):
+    sys.path.insert(0, str(HERE)); from anon import anonymize   # programs never see real task/document ids, even host-side
     V = json.load(open(PACK / "shared/views_train.json")); views = FIN / f"_views_{tag}.json"
-    json.dump({t: V[t] for t in fold["task_ids"]}, open(views, "w")); out = FIN / f"_out_{tag}.json"
+    av, hmap = anonymize({t: V[t] for t in fold["task_ids"]}); json.dump(av, open(views, "w")); out = FIN / f"_out_{tag}.json"
     subprocess.run([sys.executable, str(HERE / "pipeline_runner.py"), *(str(mods[r]) for r in ROLES), str(views), str(out)], check=True, timeout=3600)
     o = json.load(open(out)); views.unlink(); out.unlink()
-    g = [fold["base_jt"][t] - jt(o["forecasts"][t], fold["truth"][t]) for t in fold["task_ids"]]
+    g = [fold["base_jt"][t] - jt(o["forecasts"][h], fold["truth"][t]) for h, t in hmap.items()]
     return dict(robust_gain=robust(g), mean_gain=statistics.mean(g), better=sum(x > 1e-9 for x in g), worse=sum(x < -1e-9 for x in g), runtime_errors=len(o["errors"]))
 
 
@@ -58,7 +59,9 @@ cands += [("L5:routed", dict(s4, decision=OUT / "routed_adjust.py")), ("L5:R2", 
 f1 = open_fold("F1_selection")
 table = [(name, m, score(m, f1, f"F1_{i}")) for i, (name, m) in enumerate(cands)]
 del f1
-best_i = max(range(len(table)), key=lambda i: (table[i][2]["robust_gain"], -i))
+# pre-registered: a candidate with ANY runtime error on F1 (a module falling back silently) is not selectable
+ok_i = [i for i in range(len(table)) if table[i][2]["runtime_errors"] == 0] or [0]
+best_i = max(ok_i, key=lambda i: (table[i][2]["robust_gain"], -i))
 name, chosen, _ = table[best_i]
 for r, p in chosen.items(): shutil.copy(p, FIN / f"final_{MOD[r]}.py")
 json.dump(dict(chosen=name, modules_sha256={f"final_{MOD[r]}.py": sha(FIN / f"final_{MOD[r]}.py") for r in ROLES},

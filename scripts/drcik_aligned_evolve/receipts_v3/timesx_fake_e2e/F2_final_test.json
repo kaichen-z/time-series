@@ -1,0 +1,10 @@
+{
+ "locked": "L5R1:L5_C",
+ "F2": {
+  "robust_gain": 0.10686785592100786,
+  "mean_gain": 0.11365911680476944,
+  "better": 19,
+  "worse": 7,
+  "runtime_errors": 0
+ }
+}

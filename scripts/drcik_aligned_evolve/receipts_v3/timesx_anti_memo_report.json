@@ -69,7 +69,24 @@
   },
   "legitimate_change": {
    "rejected": false,
-   "response": "{\"eligible\": true, \"round\": null, \"feedback_fitness\": -0.015, \"better\": 7, \"worse\": 20, \"runtime_errors\": 0, \"runtime_error_kinds\": [], \"budget_left\": 988}"
+   "response": "{\"eligible\": true, \"round\": null, \"feedback_fitness\": -0.015, \"runtime_errors\": 0, \"budget_left\": 988}"
+  },
+  "v3_identity": {
+   "single_handle_probe_fields": [
+    "budget_left",
+    "eligible",
+    "feedback_fitness",
+    "round",
+    "runtime_errors"
+   ],
+   "only_allowed_fields": true,
+   "fitness_quantised": true,
+   "handles_disjoint_across_runs": true,
+   "doc_ids_disjoint_across_runs": true,
+   "order_differs": true,
+   "no_real_task_ids_in_views": true,
+   "no_identity_keys_in_views": true,
+   "single_target_description": true
   }
  },
  "agent_visible_leaks": []

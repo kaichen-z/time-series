@@ -52,6 +52,11 @@ attacks["compact_memorisation_runtime"] = ("numerical", seed_fc + "\n_F0 = forec
     if n_numbers <= 290 else ("numerical", None)
 for spec in A.cheat:
     role, path = spec.split(":", 1); attacks[f"replayed_champion:{Path(path).parent.parent.name}/{Path(path).name}"] = (role, Path(path).read_text())
+# v3 identity attack: change the prediction of exactly ONE visible row handle; the response may contain only the
+# pre-registered fields (quantised fitness, runtime-error count, eligibility, round, budget)
+one_h = sorted(V)[0]
+attacks_v3 = {"single_handle_probe": ("numerical", seed_fc + f"\n_F0 = forecast\ndef forecast(view):\n    f = _F0(view)\n"
+                                       f"    return [x * 1.5 for x in f] if view['history'][-1] == {V[one_h]['history'][-1]!r} else f\n")}
 legit = ("numerical", seed_fc.replace("(0.4, 0.6, 0.0)", "(0.45, 0.55, 0.0)").replace("(0.7, 0.2, 0.1), 0.3", "(0.65, 0.25, 0.1), 0.3"))
 
 report = {}
@@ -60,14 +65,33 @@ for name, (role, code) in attacks.items():
     out = submit(agent_of[role], role, code); rej = out.startswith("ERROR")
     report[name] = dict(role=role, rejected=rej, response=out[:220])
 out = submit(agent_of["numerical"], "numerical", legit[1]); report["legitimate_change"] = dict(rejected=out.startswith("ERROR"), response=out[:300])
+probe = submit(agent_of["numerical"], "numerical", attacks_v3["single_handle_probe"][1])
+allowed = {"eligible", "round", "feedback_fitness", "runtime_errors", "budget_left"}
+pj = json.loads(probe) if probe.startswith("{") else {}
+fit = pj.get("feedback_fitness")
+report_v3 = dict(single_handle_probe_fields=sorted(pj), only_allowed_fields=set(pj) <= allowed,
+                 fitness_quantised=fit is not None and abs(round(fit, 3) - fit) < 1e-12)
+# cross-run alignment: a second run dir from the same pack must use disjoint handles / doc ids and a different order
+run2 = OUT / "prep/dry/L4_B1"; V2 = json.load(open(run2 / "shared/views_train.json"))
+hmap = json.load(open(run / "private/handle_map.json")); real = set(hmap.values())
+docs1 = {d["document_id"] for v in V.values() for d in v["documents"]}; docs2 = {d["document_id"] for v in V2.values() for d in v["documents"]}
+txt1 = (run / "shared/views_train.json").read_text()
+report_v3.update(handles_disjoint_across_runs=not (set(V) & set(V2)), doc_ids_disjoint_across_runs=not (docs1 & docs2),
+                 order_differs=[V[h]["history"][-1] for h in V] != [V2[h]["history"][-1] for h in V2],
+                 no_real_task_ids_in_views=not any(t in txt1 for t in real),
+                 no_identity_keys_in_views=not any(k in v for v in V.values() for k in ("tid", "task_id", "group_id", "entity_name")),
+                 single_target_description=len({v["target_description"] for v in V.values()}) == 1)
+report["v3_identity"] = report_v3
 (run / "STOP").write_text("x"); d.wait(timeout=600)
 # agent-visible files must not carry per-task truth / task ids / per-task values
 leaks = []
 truth_vals = {round(x, 4) for t in vis for x in ed["truth"][t]}
 for f in list((run / "shared/traces").glob("*")) + list((run / "results").glob("*.json")) + list((run / "shared/attempts").glob("*.json")):
     txt = f.read_text()
-    if any(t in txt for t in vis): leaks.append(f"{f.relative_to(run)}: contains task ids")
-    if re.search(r'"(truth|visible_per_task|worst5|best5|runtime_errors)"', txt): leaks.append(f"{f.relative_to(run)}: per-task field")
-ok = (all(v.get("rejected") or "skipped" in v for k, v in report.items() if k != "legitimate_change") and not report["legitimate_change"]["rejected"] and not leaks)
+    hm = json.load(open(run / "private/handle_map.json"))
+    if any(t in txt for t in list(hm) + list(hm.values())): leaks.append(f"{f.relative_to(run)}: contains row handles or task ids")
+    if re.search(r'"(truth|visible_per_task|worst5|best5|runtime_errors|visible_better|visible_worse|hidden_check)"', txt): leaks.append(f"{f.relative_to(run)}: per-task/extra field")
+ok = (all(v.get("rejected") or "skipped" in v for k, v in report.items() if k not in ("legitimate_change", "v3_identity"))
+      and not report["legitimate_change"]["rejected"] and not leaks and all(report["v3_identity"][k] for k in report["v3_identity"] if k != "single_handle_probe_fields"))
 res = dict(dataset=A.dataset, ok=ok, attacks=report, agent_visible_leaks=leaks)
 json.dump(res, open(OUT / "anti_memo_report.json", "w"), indent=1); print(json.dumps(res, indent=1)); sys.exit(0 if ok else 1)

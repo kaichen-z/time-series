@@ -29,6 +29,7 @@ import argparse, concurrent.futures as CF, hashlib, json, os, shutil, statistics
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 P = argparse.ArgumentParser()
 P.add_argument("--dataset", choices=("timesx", "time_mmd"), required=True)
 P.add_argument("--pack", type=Path, required=True)
@@ -97,8 +98,12 @@ def prep_run(name, seeds, stage, fold_key="F0", roles=None, phased=False, role_t
     for s in ("shared/notes", "shared/skills", "shared/attempts", "shared/traces", "private", "queue", "results"): (run / s).mkdir(parents=True)
     # Protocol v2: a run dir gets ONLY the F0 feedback tasks (views + truth). F1/F2 never enter a run dir.
     f0 = json.load(open(PACK / "private/eval_F0_feedback.json")); V_all = json.load(open(PACK / "shared/views_train.json"))
-    json.dump({t: V_all[t] for t in f0["task_ids"]}, open(run / "shared/views_train.json", "w"))
-    json.dump(dict(truth=f0["truth"], base_jt=f0["base_jt"], folds=[f0["task_ids"]]), open(run / "private/eval_data.json", "w"))
+    # v3: fresh opaque row handles per run (no task/document ids, shuffled); handle map host-private
+    from anon import anonymize
+    av, hmap = anonymize({t: V_all[t] for t in f0["task_ids"]})
+    json.dump(av, open(run / "shared/views_train.json", "w")); json.dump(hmap, open(run / "private/handle_map.json", "w"))
+    json.dump(dict(truth={h: f0["truth"][t] for h, t in hmap.items()}, base_jt={h: f0["base_jt"][t] for h, t in hmap.items()}, folds=[list(hmap)]),
+              open(run / "private/eval_data.json", "w"))
     for r in ROLES: shutil.copy(seeds[r], run / f"shared/best_{MOD[r]}.py"); (run / f"shared/{r}").mkdir()
     json.dump(dict(stage=name, fold_key=fold_key, **SCORING[stage], **({"roles": roles} if roles else {}),
                    forbidden_terms=json.load(open(PACK / "private/forbidden_terms.json"))), open(run / "stage.json", "w"), indent=1)
@@ -232,10 +237,14 @@ def parallel(jobs):
 
 def route(r1_runs, seeds, run_dir):
     """v3.3.2 L5 routing (ensemble.py) generalised: per (freq,H) cell, the R1 champion with the best visible-fold mean gain."""
-    ed = json.load(open(PACK / "private/eval_F0_feedback.json")); vis = ed["task_ids"]; V = json.load(open(PACK / "shared/views_train.json"))
+    from anon import anonymize
+    f0 = json.load(open(PACK / "private/eval_F0_feedback.json")); V0 = json.load(open(PACK / "shared/views_train.json"))
+    V, hmap = anonymize({t: V0[t] for t in f0["task_ids"]}); vis = list(V)
+    ed = dict(truth={h: f0["truth"][t] for h, t in hmap.items()}, base_jt={h: f0["base_jt"][t] for h, t in hmap.items()})
+    vf = run_dir / "_route_views.json"; json.dump(V, open(vf, "w"))
     cell = {t: f"{V[t]['freq']}|H{V[t]['H']}" for t in V}; gains = {}; names = list(r1_runs)
     for name, run in r1_runs.items():
-        o = run_pipeline(dict(seeds, decision=run / "shared/best_adjust.py"), PACK / "shared/views_train.json", run_dir / f"_route_{name}.json")
+        o = run_pipeline(dict(seeds, decision=run / "shared/best_adjust.py"), vf, run_dir / f"_route_{name}.json")
         gains[name] = {t: ed["base_jt"][t] - jt(o["forecasts"][t], ed["truth"][t]) for t in vis}
     overall = max(names, key=lambda n: (statistics.mean(gains[n].values()), -names.index(n)))
     table = {c: max(names, key=lambda n: (statistics.mean(gains[n][t] for t in vis if cell[t] == c), -names.index(n))) for c in sorted({cell[t] for t in vis})}

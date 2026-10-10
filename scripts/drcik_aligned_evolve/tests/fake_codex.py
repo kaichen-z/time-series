@@ -13,11 +13,11 @@ ep = int(re.search(r"Episode (\d+)/", prompt).group(1))
 for k in range(2):
     fac = 1 + 0.01 * ((hash((aid, ep, k)) % 7) - 3)
     if role == "numerical":
-        code = src + f"\n_f0 = forecast\ndef forecast(view):\n    return [x * {fac} for x in _f0(view)]\n"
+        n = f"_f{ep}_{k}_{aid}"; code = src + f"\n{n} = forecast\ndef forecast(view):\n    return [x * {fac} for x in {n}(view)]\n"
     elif role == "retrieval":
-        code = src + f"\n_r0 = retrieve\ndef retrieve(view):\n    return [dict(c, multiplier=1 + (c['multiplier'] - 1) * {fac}) for c in _r0(view)]\n"
+        n = f"_r{ep}_{k}_{aid}"; code = src + f"\n{n} = retrieve\ndef retrieve(view):\n    return [dict(c, multiplier=1 + (c['multiplier'] - 1) * {fac}) for c in {n}(view)]\n"
     else:
-        code = src + f"\n_a0 = adjust\ndef adjust(view):\n    b = view['base_forecast']\n    return [bb + (a - bb) * {fac} for a, bb in zip(_a0(view), b)]\n"
+        n = f"_a{ep}_{k}_{aid}"; code = src + f"\n{n} = adjust\ndef adjust(view):\n    b = view['base_forecast']\n    return [bb + (a - bb) * {fac} for a, bb in zip({n}(view), b)]\n"
     p = ws / f"cand_{ep}_{k}.py"; p.write_text(code)
     r = subprocess.run([sys.executable, re.search(r"python3 (\S+submit\.py)", prompt).group(1), str(p), "--role", role, "--note", "fake"], capture_output=True, text=True)
     print(r.stdout[-300:], r.stderr[-300:])

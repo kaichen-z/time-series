@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Protocol v2 selection test (no model): a program that only changes forecasts for the F0 feedback groups (a group-specific
-rule; here it even fits F0 tasks exactly, which evolution would block, to make it maximally attractive on F0) must NOT be
-chosen by final_select.py, because F1 consists of other groups. Also checks the F1/F2 access log (1 / 1, F2 after lock).
+"""Protocol v2 selection test (no model): injecting into the L7 candidate a rule that only changes forecasts for the F0
+feedback tasks (here it even reproduces F0 exactly, which evolution would block, to make it maximally attractive on F0)
+must give it NO advantage on F1 (F1 score identical to the un-injected L7) and must not change which program is selected.
+Also checks the F1/F2 access log (1 / 1, F2 after lock).
 usage: test_group_rule_selection.py --run-out OUT_OF_A_COMPLETED_FAKE_RUN --pack PACK --out NEW_OUT"""
 import argparse, json, shutil, subprocess, sys
 from pathlib import Path
@@ -19,6 +20,9 @@ l7.write_text(l7.read_text() + "\n_PARENT = forecast\n_RULES = " + repr({repr(k)
 r = subprocess.run([sys.executable, str(HERE / "final_select.py"), "--out", str(A.out), "--pack", str(A.pack)], capture_output=True, text=True)
 lock = json.load(open(A.out / "final/LOCK.json")); acc = json.load(open(A.out / "final/access_log.json"))
 f1 = {row["candidate"]: row["robust_gain"] for row in lock["F1_table"]}
-ok = lock["chosen"] != "L7" and acc == dict(F1_opens=1, F2_opens=1, F2_opened_after_lock=True)
-res = dict(ok=ok, chosen=lock["chosen"], F1_L7=f1["L7"], F1_best=max(f1.values()), access=acc, rc=r.returncode)
+orig = json.load(open(A.run_out / "final/LOCK.json")); f1_orig = {row["candidate"]: row["robust_gain"] for row in orig["F1_table"]}
+ok = (abs(f1["L7"] - f1_orig["L7"]) < 1e-12 and lock["chosen"] == orig["chosen"]
+      and acc == dict(F1_opens=1, F2_opens=1, F2_opened_after_lock=True))
+res = dict(ok=ok, chosen=lock["chosen"], chosen_without_injection=orig["chosen"], F1_L7_injected=f1["L7"], F1_L7_original=f1_orig["L7"],
+           access=acc, rc=r.returncode)
 print(json.dumps(res, indent=1)); sys.exit(0 if ok else 1)

@@ -1,0 +1,13 @@
+{
+ "ok": true,
+ "chosen": "L7",
+ "chosen_without_injection": "L7",
+ "F1_L7_injected": 0.4208050439660763,
+ "F1_L7_original": 0.4208050439660763,
+ "access": {
+  "F1_opens": 1,
+  "F2_opens": 1,
+  "F2_opened_after_lock": true
+ },
+ "rc": 0
+}

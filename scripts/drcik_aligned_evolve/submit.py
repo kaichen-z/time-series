@@ -17,5 +17,5 @@ time.sleep(0.5); r = json.load(open(res))
 if "error" in r: print("ERROR:", r["error"]); sys.exit(1)
 print(json.dumps(dict(eligible=r.get("eligible", r["accepted"]), round=r.get("round"),
                       feedback_fitness=r["visible_fitness"],
-                      better=r["visible_better"], worse=r["visible_worse"], runtime_errors=r["n_runtime_errors"], runtime_error_kinds=r["runtime_error_kinds"],
+                      runtime_errors=r["n_runtime_errors"],
                       budget_left=r["budget_left"])))

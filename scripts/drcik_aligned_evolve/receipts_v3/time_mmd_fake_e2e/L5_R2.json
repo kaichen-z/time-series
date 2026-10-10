@@ -1,0 +1,26 @@
+{
+ "stage": "L5_R2",
+ "runs": {
+  "L5_R2": {
+   "submissions": 24,
+   "best_F0": 0.06937116443583607,
+   "used": {
+    "R2": 8,
+    "R3": 8,
+    "R1": 8
+   }
+  }
+ },
+ "episodes_accounted": 40,
+ "failed_episodes": 0,
+ "refused": 0,
+ "overshoot_units": 0,
+ "net_tokens": 34000,
+ "final": "L5_R2",
+ "modules_sha256": {
+  "numerical": "5a7102d2cb9fc6dd0bdb107c95e7a754989afb4e9cb0e0b99508713602dd0331",
+  "retrieval": "d4970de1259fab09785e2459d54ed0ba72d954722234252b5a10f8d747062627",
+  "decision": "c81687b34f98283d24b26acd9e23f661222dc2c416351a2a9df5c191cfad633e"
+ },
+ "stop": null
+}

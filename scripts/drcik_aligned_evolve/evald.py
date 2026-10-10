@@ -73,7 +73,7 @@ def robust(g): return statistics.mean(g) + PEN * statistics.mean(min(0.0, x) for
 def public(d):
     """what agents may read: fixed precision (4 decimals) for scores; everything else is already aggregate."""
     d = dict(d)
-    if "visible_fitness" in d: d["visible_fitness"] = round(d["visible_fitness"], 4)
+    if "visible_fitness" in d: d["visible_fitness"] = round(d["visible_fitness"], 3)  # pre-registered quantisation 1e-3
     return d
 
 
@@ -93,9 +93,8 @@ def score(mods, check_memo=False):
             raise RuntimeError(f"rejected as memorisation: {len(near)} visible tasks reproduced almost exactly (error <= {NEAR_PERFECT_REL} x Toto)")
     vis = {t: per[t] for t in VIS}
     # agents see only fixed-precision aggregates: no task ids, rankings or per-task values
-    pub = dict(visible_fitness=robust(list(vis.values())),
-               visible_better=sum(g > 1e-9 for g in vis.values()), visible_worse=sum(g < -1e-9 for g in vis.values()),
-               n_runtime_errors=sum(t in vis for t in r["errors"]), runtime_error_kinds=sorted({e.split(":")[0] for t, e in r["errors"].items() if t in vis}))
+    # v3: a single aggregate fitness (quantised to 1e-3 when shown) + total runtime-error count; no better/worse counts
+    pub = dict(visible_fitness=robust(list(vis.values())), n_runtime_errors=sum(t in vis for t in r["errors"]))
     return pub, 0.0  # no hidden scalar exists during evolution (sync_round ties on it are neutral)
 
 
