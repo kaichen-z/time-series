@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "candidates": [
+    {"name": "fixed:raw_toto", "forecast": "raw_toto.py"},
+    {"name": "fixed:raw_timesfm", "forecast": "raw_timesfm.py"},
+    {"name": "fixed:raw_moirai", "forecast": "raw_moirai.py"},
+    {"name": "fixed:raw_chronos", "forecast": "raw_chronos.py"},
+    {"name": "fixed:ensemble_mean4", "forecast": "ensemble_mean.py"},
+    {"name": "fixed:ensemble_median4", "forecast": "ensemble_median.py"}
+  ],
+  "retrieval": "passthrough_retrieve.py",
+  "decision": "passthrough_adjust.py"
+}
