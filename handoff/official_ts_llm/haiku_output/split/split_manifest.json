@@ -1,0 +1,63 @@
+{
+  "contains_numeric_history_or_labels": false,
+  "contains_test_ids": false,
+  "documents": 49673,
+  "duplicate_document_ids": 0,
+  "events": 72400,
+  "exact_document_closure": true,
+  "files": {
+    "time_mmd_document_split_membership.jsonl": {
+      "dev_documents": 4857,
+      "documents": 38781,
+      "sha256": "30afba9f2af08663f593a5bbb17fe96f17539ea3826237ccb57e66f0187e3cc7",
+      "shared_train_dev_documents": 0,
+      "train_documents": 33924
+    },
+    "time_mmd_events.jsonl": {
+      "documents": 38781,
+      "empty_event_documents": 3204,
+      "events": 55931,
+      "sha256": "0cd09296f352693c26c5cf14de738abe4d87e425719f86fa2b195244635b17a2"
+    },
+    "time_mmd_events_valid.jsonl": {
+      "documents": 38781,
+      "events": 55749,
+      "normalization": "invalid events quarantined; document IDs and all valid events unchanged",
+      "quarantined_events": 182,
+      "sha256": "a5e7e34a57eda8c018beeefe5269ef1cca77bb82d5c09e48c33c08fa3ccffbc7"
+    },
+    "timesx_document_split_membership.jsonl": {
+      "dev_documents": 2200,
+      "documents": 10892,
+      "sha256": "de52bcc597d20eeca8e435c0192a2908871b10a432cc96cbd067642e892d7c9c",
+      "shared_train_dev_documents": 0,
+      "train_documents": 8692
+    },
+    "timesx_events.jsonl": {
+      "documents": 10892,
+      "empty_event_documents": 7310,
+      "events": 16469,
+      "sha256": "cbcc07486f3a11f04627b05cbf275bce0817fab29ec53386fc9403bd74d234b9"
+    },
+    "timesx_events_valid.jsonl": {
+      "documents": 10892,
+      "events": 16464,
+      "normalization": "invalid events quarantined; document IDs and all valid events unchanged",
+      "quarantined_events": 5,
+      "sha256": "d048aef16c5c7781ba5a56ec95cb465f379ae3b3cb6963eb063d158685914dde"
+    },
+    "validation_errors.jsonl": {
+      "documents": 153,
+      "errors": 187,
+      "sha256": "83e68bfa38b6933a66166a32b07726dc0c66d315bb25e73ab20c6b6cdab0a13f"
+    }
+  },
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_sha256": "18a0f847c87cf5f8a49a1df0ca7c1c1e96c979729695dda1fe4cc9b37a3f2275",
+  "schema": "official-haiku-benchmark-split-v1",
+  "schema_and_calendar_dates_valid": false,
+  "source_commit": "f8e4762185b354582363930ee219295aebee3c6e",
+  "source_events_sha256": "932f124269844812f7d2f0e1d976964c07b680354ba14e11a5f4cab0f289f3d3",
+  "source_manifest_sha256": "75117cf4d40b651d3b7793cab6c1b9f399c65f53f954212177d5f288550295e6",
+  "validation_error_count": 187
+}
