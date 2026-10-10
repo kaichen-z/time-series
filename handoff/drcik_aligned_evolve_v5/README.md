@@ -5,13 +5,22 @@ Time-MMD protocol-v5 run. It evolves on all Train tasks, opens Dev once for
 host-private final selection, locks the selected program, and does not open
 official Test.
 
-The frozen package is not committed because it is 173 MB and exceeds GitHub's
-100 MB per-file limit. Obtain the separately distributed
-`drcik_aligned_evolve_v5.tgz` and verify:
+The frozen 173 MB package is committed as two byte-for-byte split parts because
+GitHub limits individual files to 100 MB. Reassemble and verify it before use:
 
-```text
-6392b172d6cd987e795d0d0d43ef7b3d790523bf294b1db9a9e9d620cd570137
+```bash
+sha256sum -c parts.sha256
+cat drcik_aligned_evolve_v5.tgz.part00 \
+    drcik_aligned_evolve_v5.tgz.part01 > drcik_aligned_evolve_v5.tgz
+echo "6392b172d6cd987e795d0d0d43ef7b3d790523bf294b1db9a9e9d620cd570137  drcik_aligned_evolve_v5.tgz" | sha256sum -c -
 ```
+
+Expected part sizes and SHA256 values:
+
+| File | Bytes | SHA256 |
+|---|---:|---|
+| `drcik_aligned_evolve_v5.tgz.part00` | 94,371,840 | `de0f4d95fdc5032a5e3642531b4c88a1a5ffe232407ec3847b74ee541826e498` |
+| `drcik_aligned_evolve_v5.tgz.part01` | 78,205,531 | `89206f95401aa7953f7e4322e34fc191b1eec64ef62a0a44bde418a8607559c9` |
 
 Run from a Linux host with Python 3, NumPy, bubblewrap, tmux, and an
 authenticated Codex CLI:
@@ -19,7 +28,7 @@ authenticated Codex CLI:
 ```bash
 cd handoff/drcik_aligned_evolve_v5
 export CODEX_BIN="$(command -v codex)"
-bash run_formal_v5_tmux.sh /absolute/path/drcik_aligned_evolve_v5.tgz /absolute/path/ts_v5_formal
+bash run_formal_v5_tmux.sh "$PWD/drcik_aligned_evolve_v5.tgz" /absolute/path/ts_v5_formal
 ```
 
 The launcher refuses to overwrite the work directory, verifies the package
