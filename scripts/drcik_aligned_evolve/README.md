@@ -26,7 +26,10 @@ Every agent episode runs inside bubblewrap (`sandbox_codex.py`): only system dir
 `RUN/shared` + `RUN/queue` (rw), `RUN/results` (ro), the agent workspace and `submit.py` are mounted; own PID namespace,
 clean environment. `RUN/private` (truth, folds, state), packs, official data repositories and the ledger are not visible.
 `--leak-test` runs an active probe inside the same sandbox (must fail to read every forbidden path / other processes).
-Whether the real codex works inside bwrap needs ONE approved smoke call (not part of these tests).
+Real-codex check: one owner-approved smoke episode (2026-10-10 09:01Z, run by yyoraa on commit 09d35be) passed inside the sandbox
+(1 turn, ledger reported, 1 submission scored, hidden check pass). Two earlier smoke calls failed with 0 model output because
+the resolver dir was not mounted (fixed in 09d35be; see receipts/smoke1_failed_dns.json). The dry-run/leak/fake-e2e receipts
+were produced before that one-line sandbox fix, so their recorded sandbox_codex.py SHA differs from the current file.
 
 ## Retrieval seed (pre-registered, pure function of the view)
 Events with direction up/down and confidence >= 0.6 become corrections either (1) on the forecast steps covered by their
