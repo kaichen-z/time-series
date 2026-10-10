@@ -5,8 +5,9 @@ into TimesX and Time-MMD without changing document IDs or introducing labels,
 numeric histories, or Test identities.
 
 Use the `*_events_valid.jsonl` files for downstream training/evolution. They
-preserve every document row and every valid event, while quarantining 301
-invalid or unsafe event records listed in `validation_errors.jsonl`:
+preserve every document row and every valid event, while recording 301
+validation findings in `validation_errors.jsonl` and quarantining the 300
+affected invalid or unsafe events (one event triggers two findings):
 
 - 120 reversed date ranges (`time_start > time_end`)
 - 3 invalid calendar dates
