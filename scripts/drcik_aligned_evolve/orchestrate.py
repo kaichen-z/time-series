@@ -44,6 +44,7 @@ A = P.parse_args()
 DS = A.dataset; PACK = A.pack.resolve(); OUT = A.out.resolve()
 ROLES = ("numerical", "retrieval", "decision"); MOD = {"numerical": "forecast", "retrieval": "retrieve", "decision": "adjust"}
 PER, R4, R5, R7, FAIL_FRAC = 5, 4, 4, 2, 0.05
+MIN_CELL = 3  # minimum visible tasks per (freq,H) cell before per-method error means are shown
 SCORING = {"L4": dict(scaled_gain=False, eps=1e-4, hidden_tol=1e-9), "L5": dict(scaled_gain=False, eps=1e-4, hidden_tol=1e-9),
            "L7": dict(scaled_gain=True, eps=1e-5, hidden_tol=1e-6)}
 DESC = {
@@ -90,24 +91,34 @@ def retrieval_coverage(views_f, retrieve_f):
 
 
 # ---------------------------------------------------------------- run directories (never overwritten)
-def prep_run(name, seeds, stage, fold_key="folds", roles=None, phased=False, role_text="", notes_text=""):
+def prep_run(name, seeds, stage, fold_key="F0", roles=None, phased=False, role_text="", notes_text=""):
     run = OUT / name
     if run.exists(): raise SystemExit(f"refusing to overwrite existing run dir {run} (use --resume / --restart-stage)")
     for s in ("shared/notes", "shared/skills", "shared/attempts", "shared/traces", "private", "queue", "results"): (run / s).mkdir(parents=True)
-    shutil.copy(PACK / "shared/views_train.json", run / "shared/views_train.json"); shutil.copy(PACK / "private/eval_data.json", run / "private/eval_data.json")
+    # Protocol v2: a run dir gets ONLY the F0 feedback tasks (views + truth). F1/F2 never enter a run dir.
+    f0 = json.load(open(PACK / "private/eval_F0_feedback.json")); V_all = json.load(open(PACK / "shared/views_train.json"))
+    json.dump({t: V_all[t] for t in f0["task_ids"]}, open(run / "shared/views_train.json", "w"))
+    json.dump(dict(truth=f0["truth"], base_jt=f0["base_jt"], folds=[f0["task_ids"]]), open(run / "private/eval_data.json", "w"))
     for r in ROLES: shutil.copy(seeds[r], run / f"shared/best_{MOD[r]}.py"); (run / f"shared/{r}").mkdir()
-    json.dump(dict(stage=name, fold_key=fold_key, **SCORING[stage], **({"roles": roles} if roles else {})), open(run / "stage.json", "w"), indent=1)
+    json.dump(dict(stage=name, fold_key=fold_key, **SCORING[stage], **({"roles": roles} if roles else {}),
+                   forbidden_terms=json.load(open(PACK / "private/forbidden_terms.json"))), open(run / "stage.json", "w"), indent=1)
     if phased: json.dump(dict(phase="numerical"), open(run / "shared/phase.json", "w"))
     if roles: json.dump(roles, open(run / "shared/roles.json", "w"), indent=1)  # agent -> module (not secret; agents see it)
-    ed = json.load(open(run / "private/eval_data.json")); F = ed[fold_key]; vis = set(F[0] + F[1]); V = json.load(open(run / "shared/views_train.json"))
+    ed = json.load(open(run / "private/eval_data.json")); vis = set(ed["folds"][0]); V = json.load(open(run / "shared/views_train.json"))
     o = run_pipeline({r: run / f"shared/best_{MOD[r]}.py" for r in ROLES}, run / "shared/views_train.json", run / "private/_seed_out.json")
-    with open(run / "shared/traces/visible.jsonl", "w") as fo:
-        for t in sorted(vis):
-            y = ed["truth"][t]
-            fo.write(json.dumps(dict(tid=t, fold=0 if t in F[0] else 1, truth=y, toto_joint_error=round(ed["base_jt"][t], 4),
-                                     method_joint_errors={m: round(jt(f, y), 4) for m, f in V[t]["method_forecasts"].items()},
-                                     seed_base_forecast=o["base"][t], seed_corrections=o["corrections"][t], seed_final_forecast=o["forecasts"][t],
-                                     seed_final_gain=round(ed["base_jt"][t] - jt(o["forecasts"][t], y), 4))) + "\n")
+    # Anti-memorisation (v2): agents get NO per-task information (no truth, forecasts, per-task or per-method errors,
+    # task identities or rankings). Only aggregates over >= MIN_CELL visible tasks of a (freq,H) cell and over all
+    # visible tasks, rounded to 3 decimals.
+    cells = {}
+    for t in vis: cells.setdefault(f"{V[t]['freq']}|H{V[t]['H']}", []).append(t)
+    def agg(ts):
+        ms = sorted(set.intersection(*[set(V[t]["method_forecasts"]) for t in ts]))
+        return dict(n=len(ts), mean_toto_joint_error=round(statistics.mean(ed["base_jt"][t] for t in ts), 3),
+                    mean_seed_gain=round(statistics.mean(ed["base_jt"][t] - jt(o["forecasts"][t], ed["truth"][t]) for t in ts), 3),
+                    mean_method_joint_error={m: round(statistics.mean(jt(V[t]["method_forecasts"][m], ed["truth"][t]) for t in ts), 3) for m in ms})
+    summ = {c: (agg(ts) if len(ts) >= MIN_CELL else dict(n=len(ts), note=f"fewer than {MIN_CELL} visible tasks: withheld")) for c, ts in sorted(cells.items())}
+    summ["ALL_VISIBLE"] = agg(sorted(vis))
+    json.dump(summ, open(run / "shared/traces/visible_summary.json", "w"), indent=1)
     task = (HERE / "prompts/TASK_TEMPLATE.md").read_text()
     gain_txt = ("relative gain = (Toto error - final error) / (mean Toto error)" if SCORING[stage]["scaled_gain"] else "gain = Toto error - final error")
     for k, v in dict(DATASET_NAME=NAME[DS], STAGE=name, DATASET_DESC=DESC[DS], ROLE_TEXT=role_text, NOTES_TEXT=notes_text, GAIN=gain_txt,
@@ -151,7 +162,7 @@ def run_kwargs(stage, name, agents):
                     notes_text=SHARED_NOTES if len(agents) > 1 else INDEP_NOTES)
     if stage in ("L5_R1", "L5_R2"):
         return dict(stage="L5", roles={a: "decision" for a in agents}, role_text=ROLE_TEXT["decision"], notes_text=SHARED_NOTES if len(agents) > 1 else INDEP_NOTES,
-                    fold_key="folds_secondary" if stage == "L5_R2" else "folds")
+                    fold_key="F0")  # v2: R2 also evolves on F0 (a secondary re-split would expose F1/F2 groups)
     return dict(stage="L7", phased=True, role_text=ROLE_TEXT["phased"], notes_text=SHARED_NOTES)
 
 
@@ -221,7 +232,7 @@ def parallel(jobs):
 
 def route(r1_runs, seeds, run_dir):
     """v3.3.2 L5 routing (ensemble.py) generalised: per (freq,H) cell, the R1 champion with the best visible-fold mean gain."""
-    ed = json.load(open(PACK / "private/eval_data.json")); F = ed["folds"]; vis = F[0] + F[1]; V = json.load(open(PACK / "shared/views_train.json"))
+    ed = json.load(open(PACK / "private/eval_F0_feedback.json")); vis = ed["task_ids"]; V = json.load(open(PACK / "shared/views_train.json"))
     cell = {t: f"{V[t]['freq']}|H{V[t]['H']}" for t in V}; gains = {}; names = list(r1_runs)
     for name, run in r1_runs.items():
         o = run_pipeline(dict(seeds, decision=run / "shared/best_adjust.py"), PACK / "shared/views_train.json", run_dir / f"_route_{name}.json")
@@ -242,7 +253,6 @@ def pack_summary():
     pr = json.load(open(PACK / "pack_receipt.json"))
     return dict(receipt_sha256=sha(PACK / "pack_receipt.json"), task_count=pr["task_count"],
                 folds_primary=[dict(n=f["n"], role=f["role"], groups=f["group_ids"], task_ids=f["task_ids"]) for f in pr["folds_primary"]],
-                folds_secondary=[dict(n=f["n"], role=f["role"], groups=f["group_ids"], task_ids=f["task_ids"]) for f in pr["folds_secondary"]],
                 anchor_coverage=pr["anchor_coverage"], input_sha256=pr["input_sha256"], output_sha256=pr["output_sha256"],
                 uses_test_ids_or_labels=pr["uses_test_ids_or_labels"], uses_external_dev=pr["uses_external_dev"])
 
@@ -265,17 +275,18 @@ def dry_run():
         for name, agents in spec["runs"].items():
             kw = run_kwargs(st, name, agents); run, seed = prep_run(f"dry/{name}", SEEDS0, **kw)
             rep["stages"][st][name] = dict(agents=agents, rounds=spec["rounds"], episodes=len(agents) * spec["rounds"], max_submissions=len(agents) * spec["rounds"] * PER,
-                                           budget_per_agent=spec["rounds"] * PER, fold_key=kw.get("fold_key", "folds"), roles=kw.get("roles", "phase-driven"),
-                                           seed_visible=round(seed["seed_visible"], 6), seed_hidden=round(seed["seed_hidden"], 6),
+                                           budget_per_agent=spec["rounds"] * PER, fold_key=kw.get("fold_key", "F0"), roles=kw.get("roles", "phase-driven"),
+                                           seed_visible=round(seed["seed_visible"], 6),
                                            seed_note="L4 seed" if st == "L4" else "placeholder seed (real seed = previous stage's champion)")
     rep["l7_phases"] = [[p, t, [a.split(":")[0] for a in ags]] for p, t, ags in L7_PHASES]
-    rep["selection"] = dict(L4="group A = L4_A; group B = best of L4_B1..3 by (visible desc, hidden desc, id asc); final = higher hidden robust gain, tie -> B",
-                            L5="R1 -> per (freq,H) cell routing on primary visible folds -> R2 on secondary folds; final = R2 champion", L7="final = L7 champion")
+    rep["selection"] = dict(L4="group A = L4_A; group B = best of L4_B1..3 by (F0 desc, id asc); stage seed = higher F0, tie -> B",
+                            L5="R1 -> per (freq,H) cell routing on F0 -> R2 on F0; stage seed = R2 champion", L7="L7 champion",
+                            final="final_select.py: every frozen stage candidate (+ seed) scored host-side on F1 once; best F1 locked; then F2 scored once")
     rep["retrieval_seed_coverage"] = retrieval_coverage(PACK / "shared/views_train.json", SEEDS0["retrieval"])
     rep["pack"] = pack_summary(); rep["code_sha256"] = code_sha()
     rep["llm_calls"] = len(ledger()); assert rep["llm_calls"] == 0, "dry-run must not call any model"
     json.dump(rep, open(OUT / "dry_run_report.json", "w"), indent=1)
-    s = {k: {n: (v["episodes"], v["max_submissions"], v["seed_visible"], v["seed_hidden"]) for n, v in d.items()} for k, d in rep["stages"].items()}
+    s = {k: {n: (v["episodes"], v["max_submissions"], v["seed_visible"]) for n, v in d.items()} for k, d in rep["stages"].items()}
     print(json.dumps(dict(dataset=DS, budget=rep["budget"], runs=s, retrieval_seed_coverage=rep["retrieval_seed_coverage"], llm_calls=0,
                           report=str(OUT / "dry_run_report.json")), indent=1))
 
@@ -285,7 +296,7 @@ def leak_test():
     OUT.mkdir(parents=True); write_caps()
     run, _ = prep_run("leak/L4_A", SEEDS0, **run_kwargs("L4", "L4_A", ["A1", "A2", "A3"])); (run / "ws_A1").mkdir()
     probe = HERE / "tests/leak_probe.py"; env = agent_env("leak", probe)
-    forb = [run / "private/eval_data.json", run / "private", run / "stage.json", PACK / "private/eval_data.json", PACK, OUT / "ledger", HERE / "packs",
+    forb = [run / "private/eval_data.json", run / "private", run / "stage.json", PACK / "private/eval_F1_selection.json", PACK / "private/eval_F2_final_test.json", PACK, OUT / "ledger", HERE / "packs",
             HERE / "build_pack.py", A.codex_home, *map(Path, A.forbid)]
     env["LEAK_FORBIDDEN"] = os.pathsep.join(str(p) for p in forb)
     r = subprocess.run([sys.executable, str(HERE / "sandbox_codex.py"), "exec", "-C", str(run / "ws_A1"), "-m", "x"], env=env, capture_output=True, text=True)
@@ -313,7 +324,7 @@ def real_run():
     def finish(st, ledger_stage, runs, extra):
         L = ledger(ledger_stage); com = [r for r in L if r["kind"] in ("commit", "reclaim")]
         fails = [r for r in com if r["kind"] == "reclaim" or r.get("rc", 0) != 0 or not r.get("reported", False)]
-        rec = dict(stage=st, runs={n: dict(submissions=state(OUT / n)["n"], best_visible=state(OUT / n)["best_visible"], best_hidden=state(OUT / n)["best_hidden"],
+        rec = dict(stage=st, runs={n: dict(submissions=state(OUT / n)["n"], best_F0=state(OUT / n)["best_visible"],
                                            used=state(OUT / n)["used"]) for n in runs},
                    episodes_accounted=len(com), failed_episodes=len(fails), refused=sum(r["kind"] == "refused" for r in L),
                    overshoot_units=sum(r.get("overshoot", 0) > 0 for r in com), net_tokens=sum(r["tokens"] for r in com), **extra)
@@ -328,8 +339,9 @@ def real_run():
         begin("L4", names4)
         for n, a in PLAN["L4"]["runs"].items(): prep_run(n, SEEDS0, **run_kwargs("L4", n, a))
         say("L4 start"); parallel([lambda n=n, a=a: run_rounds(OUT / n, a, R4, R4 * PER, "L4") for n, a in PLAN["L4"]["runs"].items()])
-        bchamp = sorted(["L4_B1", "L4_B2", "L4_B3"], key=lambda n: (-state(OUT / n)["best_visible"], -state(OUT / n)["best_hidden"], n))[0]
-        final4 = "L4_A" if state(OUT / "L4_A")["best_hidden"] > state(OUT / bchamp)["best_hidden"] else bchamp
+        bchamp = sorted(["L4_B1", "L4_B2", "L4_B3"], key=lambda n: (-state(OUT / n)["best_visible"], n))[0]
+        # v2: no hidden fold during evolution -> A vs B by F0 fitness, tie -> B (F1 decides the FINAL program later)
+        final4 = "L4_A" if state(OUT / "L4_A")["best_visible"] > state(OUT / bchamp)["best_visible"] else bchamp
         finish("L4", "L4", names4, dict(group_A="L4_A", group_B_champion=bchamp, final=final4,
                                         modules_sha256={r: sha(p) for r, p in modules(OUT / final4).items()}))
     s4 = modules(OUT / json.load(open(OUT / "receipts/L4.json"))["final"])
@@ -351,10 +363,13 @@ def real_run():
     if not done("L7"):
         begin("L7", ["L7"]); prep_run("L7", s5, **run_kwargs("L7", "L7", PLAN["L7"]["runs"]["L7"]))
         say("L7 start"); run_rounds(OUT / "L7", None, R7, R7 * PER, "L7", phases=L7_PHASES)
-        fin = OUT / "final"; fin.mkdir(exist_ok=True)
-        for r, p in modules(OUT / "L7").items(): shutil.copy(p, fin / p.name)
-        finish("L7", "L7", ["L7"], dict(final="L7", modules_sha256={p.name: sha(p) for p in fin.glob("*.py")}, code_sha256=code_sha()))
-    say("all stages done; final modules frozen in OUT/final")
+        finish("L7", "L7", ["L7"], dict(final="L7", modules_sha256={r: sha(p) for r, p in modules(OUT / "L7").items()}, code_sha256=code_sha()))
+    # v2: host-only final selection on F1 (once), lock, then F2 final test (once)
+    if not (OUT / "final/LOCK.json").exists():
+        r = subprocess.run([sys.executable, str(HERE / "final_select.py"), "--out", str(OUT), "--pack", str(PACK)], capture_output=True, text=True)
+        if r.returncode != 0: raise SystemExit("final selection failed: " + r.stderr[-800:])
+        say("final selection locked + F2 final test written: " + r.stdout.strip()[-400:])
+    say("all stages done")
 
 
 if A.dry_run: dry_run()

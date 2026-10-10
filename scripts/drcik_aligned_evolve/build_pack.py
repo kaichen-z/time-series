@@ -148,20 +148,39 @@ for tid, w in sorted(chosen.items()):
                       documents=[dict(document_id=d.document_id, content=d.content, events=cards.get(d.document_id, [])) for d in w.documents])
     truth[tid] = list(w.truth); base_jt[tid] = jt(mf["toto_2_0"], truth[tid])
 
+# Protocol v2: series / group identity is removed from agent views (a generic target description), so programs cannot
+# key rules on particular series or groups; the identifying names go to a private list used by the static check.
+import re as _re
+terms = set()
+for tid, w in chosen.items():
+    terms.add(w.group_id.split(":")[0])
+    m = _re.search(r"records (.+?) data in the (.+?) (?:domain|exchange|based)", w.target_description)
+    if m: terms.update({m.group(1).strip(), m.group(2).strip()})
+    m = _re.search(r"Time-MMD (\S+) target series", w.target_description)
+    if m: terms.add(m.group(1))
+for v in views.values(): v["target_description"] = "TimesX target series" if DS == "timesx" else "Time-MMD target series"
 out = A.out; (out / "shared").mkdir(parents=True, exist_ok=True); (out / "private").mkdir(parents=True, exist_ok=True)
+json.dump(sorted(t for t in terms if len(t) >= 3), open(out / "private/forbidden_terms.json", "w"), indent=1)
 fold_ids = lambda F: [[w.task_id for w in f] for f in F]
 json.dump(views, open(out / "shared/views_train.json", "w"))
-json.dump(dict(truth=truth, base_jt=base_jt, folds=fold_ids(primary), folds_secondary=fold_ids(secondary)), open(out / "private/eval_data.json", "w"))
+# Protocol v2: one private file per fold so that F1 (selection) and F2 (final test) truth can be opened only by
+# final_select.py (F2 only after the final program is locked). F0 is the agents' feedback fold.
+for i, name in enumerate(("F0_feedback", "F1_selection", "F2_final_test")):
+    ids = [w.task_id for w in primary[i]]
+    json.dump(dict(fold=name, task_ids=ids, truth={t: truth[t] for t in ids}, base_jt={t: base_jt[t] for t in ids}),
+              open(out / f"private/eval_{name}.json", "w"))
 receipt = dict(
     schema="drcik-aligned-pack-v1", dataset=DS, uses_official_train_only=True, uses_external_dev=False, uses_test_ids_or_labels=False,
     task_count=len(chosen), seeds=dict(primary=SEED_PRIMARY, secondary=SEED_SECONDARY),
-    folds_primary=[dict(fold=i, role="hidden" if i == 2 else "visible", n=len(f), task_ids=[w.task_id for w in f], group_ids=sorted({w.group_id for w in f})) for i, f in enumerate(primary)],
+    folds_primary=[dict(fold=i, role=("F0_feedback", "F1_selection", "F2_final_test")[i], n=len(f), task_ids=[w.task_id for w in f], group_ids=sorted({w.group_id for w in f})) for i, f in enumerate(primary)],
     folds_secondary=[dict(fold=i, role="hidden" if i == 2 else "visible", n=len(f), task_ids=[w.task_id for w in f], group_ids=sorted({w.group_id for w in f})) for i, f in enumerate(secondary)],
     official_train_groups=len(groups), anchor_coverage={k: f"{v}/{len(chosen)}" for k, v in sorted(coverage.items())},
     documents=len(need), documents_missing_event_cards=len(missing_cards), events=sum(len(v) for v in cards.values()),
     reference="toto_2_0", internal_fitness="Toto-relative sMAE+sRMSE (cap 5), PEN 0.5, STD_W 0.25 (Dr-CiK v3.3.2)",
     input_sha256={k: sha(v) for k, v in sorted(inputs.items())}, source_fingerprint=parts.source_fingerprint,
-    output_sha256={"shared/views_train.json": sha(out / "shared/views_train.json"), "private/eval_data.json": sha(out / "private/eval_data.json")})
+    protocol="v2: F0 feedback (agents, aggregate only) / F1 host-only selection after all stages / F2 final test once after lock",
+    output_sha256={"shared/views_train.json": sha(out / "shared/views_train.json"),
+                   **{f"private/eval_{n}.json": sha(out / f"private/eval_{n}.json") for n in ("F0_feedback", "F1_selection", "F2_final_test")}})
 json.dump(receipt, open(out / "pack_receipt.json", "w"), indent=1)
 print(json.dumps(dict(dataset=DS, tasks=len(chosen), primary=[len(f) for f in primary], secondary=[len(f) for f in secondary],
                       groups_primary=[len(r["group_ids"]) for r in receipt["folds_primary"]], coverage=receipt["anchor_coverage"],

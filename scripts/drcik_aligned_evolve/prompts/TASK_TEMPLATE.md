@@ -22,14 +22,18 @@ are audited Haiku event cards `{time_start, time_end, direction (up/down/mixed/u
 ## Evaluation (you cannot run it yourself)
 `python3 {SUBMIT} my_module.py --role {ROLE_ARG} --note "what/why"`
 Per task: relative gain = (Toto error - final error) / (mean Toto error), error = sMAE + sRMSE (each capped at 5).
-Fitness: mean over the two VISIBLE folds of (mean gain + 0.5 x mean negative gain) - 0.25 x std. Synchronous rounds:
-every agent of this round starts from the same frozen champion; a submission is *eligible* if its visible fitness beats
-the round's frozen champion AND the HIDDEN fold does not get worse; at round close the best eligible submission becomes
-the next champion. Pure Python + math/statistics/numpy; no files, no network, no other data; keep it fast (all Train
-tasks are run per submission).
+Feedback fitness: (mean gain + 0.5 x mean negative gain) over the FEEDBACK tasks of this run (the only tasks you can see).
+Synchronous rounds: every agent of a round starts from the same frozen champion; a submission is *eligible* if its
+feedback fitness beats the round's frozen champion; at round close the best eligible submission becomes the next
+champion. The final program of the whole evolution is chosen later on data groups you never see, so changes that only
+fit the feedback tasks (rules for particular series/groups, memorised values) do not help. Pure Python +
+math/statistics/numpy; no files, no network, no other data; keep it fast.
 
 ## Data you may analyse
-- `$RUN_DIR/shared/views_train.json` (no labels; all tasks of this run).
-- `$RUN_DIR/shared/traces/visible.jsonl`: VISIBLE-fold tasks only, with truth, per-method errors, the seed's base and
-  final forecasts and gains. Never look for other labels (hidden fold, official Dev or Test).
+- `$RUN_DIR/shared/views_train.json` (no labels; the feedback tasks of this run).
+- `$RUN_DIR/shared/traces/visible_summary.json`: aggregate diagnostics of the feedback tasks only (per (freq,H) cell with
+  enough tasks, and overall): mean Toto error, mean seed gain, mean error of every frozen forecast. No per-task values.
+- Submissions must be general programs: they are rejected if they exceed 20 KB, contain more than 300 numeric constants or
+  2,000 characters of string data, use banned modules/builtins (encoders, compression, file/OS access, exec/eval, hashing),
+  or reproduce many feedback tasks almost exactly (treated as memorisation).
 {NOTES_TEXT}

@@ -1,0 +1,10 @@
+{
+ "locked": "L4:L4_A",
+ "F2": {
+  "robust_gain": 0.09755085289102876,
+  "mean_gain": 0.16686115595788872,
+  "better": 14,
+  "worse": 11,
+  "runtime_errors": 0
+ }
+}

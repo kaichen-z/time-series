@@ -1,0 +1,25 @@
+{
+ "dataset": "timesx",
+ "counts": {
+  "F0_feedback": 27,
+  "F1_selection": 27,
+  "F2_final_test": 26
+ },
+ "groups": {
+  "F0_feedback": 1,
+  "F1_selection": 1,
+  "F2_final_test": 1
+ },
+ "checks": {
+  "tasks_pairwise_disjoint": true,
+  "groups_pairwise_disjoint": true,
+  "union_equals_pack_80": true,
+  "all_official_train": true,
+  "no_dev_or_test_ids": true,
+  "truth_files_match_ids": true,
+  "views_have_no_identity": true,
+  "run_dir_views_only_F0": true,
+  "run_dir_truth_only_F0": true
+ },
+ "ok": true
+}

@@ -12,7 +12,7 @@
  "folds_primary": [
   {
    "fold": 0,
-   "role": "visible",
+   "role": "F0_feedback",
    "n": 27,
    "task_ids": [
     "official_a2204c8f4dabc91348f59c1a",
@@ -49,7 +49,7 @@
   },
   {
    "fold": 1,
-   "role": "visible",
+   "role": "F1_selection",
    "n": 27,
    "task_ids": [
     "official_4d5329ca904dedb84bdcf066",
@@ -86,7 +86,7 @@
   },
   {
    "fold": 2,
-   "role": "hidden",
+   "role": "F2_final_test",
    "n": 26,
    "task_ids": [
     "official_3bca5e6eb9e82753648bd778",
@@ -263,8 +263,11 @@
   "task_index": "51a4818cdf01ecc16b51b6143dc03c495b59de36accf91b20d4ab1ea93ff41a6"
  },
  "source_fingerprint": "07e9a0eec359acd8f9f6fe0503f27d842119bf0bd303871b56cd483b6957b996",
+ "protocol": "v2: F0 feedback (agents, aggregate only) / F1 host-only selection after all stages / F2 final test once after lock",
  "output_sha256": {
-  "shared/views_train.json": "73091a5aca6350ca9c09e279d01454495f648bfcf51f65942f5141a2e304f03d",
-  "private/eval_data.json": "7c359e84c7ec67ea2f2e32caa2995f0a13ce81d649cd12af239890802ab24cf0"
+  "shared/views_train.json": "1094aa0e70172e7fffc3ae4ad27b5a3b60e681f5b3822c308716f930331304b0",
+  "private/eval_F0_feedback.json": "c3f904950de5530554ba45b5a0b569c93b3c48d9a309b3bb3662d8cecb550953",
+  "private/eval_F1_selection.json": "d8c7e7ebd737895d75776620900fedd3552876362714a3363235e02860d30bdb",
+  "private/eval_F2_final_test.json": "529c5bf7fadb8a81328d29b8796729f874e067847f6c45c5fde37cb6e749ea51"
  }
 }

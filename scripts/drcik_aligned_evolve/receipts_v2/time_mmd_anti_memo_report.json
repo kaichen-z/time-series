@@ -1,0 +1,76 @@
+{
+ "dataset": "time_mmd",
+ "ok": true,
+ "attacks": {
+  "lookup_table_per_task": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected as memorisation: 3 visible tasks reproduced almost exactly (error <= 0.001 x Toto)')"
+  },
+  "compressed_table_base64_zlib": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError(\"rejected: import of 'base64'\")"
+  },
+  "big_integer_encoding": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected: 4051 characters of numeric literals (max 3000)')"
+  },
+  "bytes_string_encoding": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected: 8959 characters of string literals (max 2000)')"
+  },
+  "hash_branching": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError(\"rejected: use of 'hash'\")"
+  },
+  "exec_eval": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError(\"rejected: use of 'exec'\")"
+  },
+  "file_read": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError(\"rejected: use of 'open'\")"
+  },
+  "oversize_code": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected: code larger than 20000 bytes')"
+  },
+  "compact_memorisation_runtime": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected as memorisation: 3 visible tasks reproduced almost exactly (error <= 0.001 x Toto)')"
+  },
+  "replayed_champion:tests/time_mmd_L4_A_best_forecast.py": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected: code larger than 20000 bytes')"
+  },
+  "replayed_champion:tests/time_mmd_L4_B1_best_forecast.py": {
+   "role": "numerical",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected: code larger than 20000 bytes')"
+  },
+  "replayed_champion:tests/time_mmd_L4_B2_best_retrieve.py": {
+   "role": "retrieval",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected: series/group-specific names in string literals (9 found) - rules must be general')"
+  },
+  "replayed_champion:tests/time_mmd_L4_B3_best_adjust.py": {
+   "role": "decision",
+   "rejected": true,
+   "response": "ERROR: RuntimeError('rejected: 12976 characters of string literals (max 2000)')"
+  },
+  "legitimate_change": {
+   "rejected": false,
+   "response": "{\"eligible\": true, \"round\": null, \"feedback_fitness\": 0.0088, \"better\": 11, \"worse\": 16, \"runtime_errors\": 0, \"runtime_error_kinds\": [], \"budget_left\": 988}"
+  }
+ },
+ "agent_visible_leaks": []
+}

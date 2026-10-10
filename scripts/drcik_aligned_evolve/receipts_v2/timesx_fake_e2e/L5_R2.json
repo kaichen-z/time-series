@@ -3,12 +3,11 @@
  "runs": {
   "L5_R2": {
    "submissions": 24,
-   "best_visible": 0.04016807540531549,
-   "best_hidden": 0.0036736395941062566,
+   "best_F0": 0.0036736395941062566,
    "used": {
-    "R3": 8,
     "R1": 8,
-    "R2": 8
+    "R2": 8,
+    "R3": 8
    }
   }
  },
@@ -20,7 +19,7 @@
  "final": "L5_R2",
  "modules_sha256": {
   "numerical": "2216d5f1083994e4ac26dada64164b4743c5ae51f57525da94d92c1c530251ca",
-  "retrieval": "e3b982a005e1850a04aa55067173d0652d42af31e351956a5138352cee5c6459",
+  "retrieval": "79fc6148bf55cac909908427bb8038667ce110a1c946d22ae9718a9b3be127c9",
   "decision": "4ff1dd0d52704a95ed0f9728c277d45466be4dab44573df1013af04622a25dda"
  },
  "stop": null

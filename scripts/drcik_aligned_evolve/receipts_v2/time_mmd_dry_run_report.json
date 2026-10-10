@@ -53,14 +53,13 @@
     "episodes": 12,
     "max_submissions": 60,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "A1": "numerical",
      "A2": "retrieval",
      "A3": "decision"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "L4 seed"
    },
    "L4_B1": {
@@ -71,12 +70,11 @@
     "episodes": 4,
     "max_submissions": 20,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "B1": "numerical"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "L4 seed"
    },
    "L4_B2": {
@@ -87,12 +85,11 @@
     "episodes": 4,
     "max_submissions": 20,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "B2": "retrieval"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "L4 seed"
    },
    "L4_B3": {
@@ -103,12 +100,11 @@
     "episodes": 4,
     "max_submissions": 20,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "B3": "decision"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "L4 seed"
    }
   },
@@ -121,12 +117,11 @@
     "episodes": 4,
     "max_submissions": 20,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "S1": "decision"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "placeholder seed (real seed = previous stage's champion)"
    },
    "L5_C": {
@@ -139,14 +134,13 @@
     "episodes": 12,
     "max_submissions": 60,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "C1": "decision",
      "C2": "decision",
      "C3": "decision"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "placeholder seed (real seed = previous stage's champion)"
    },
    "L5_I1": {
@@ -157,12 +151,11 @@
     "episodes": 4,
     "max_submissions": 20,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "I1": "decision"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "placeholder seed (real seed = previous stage's champion)"
    },
    "L5_I2": {
@@ -173,12 +166,11 @@
     "episodes": 4,
     "max_submissions": 20,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "I2": "decision"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "placeholder seed (real seed = previous stage's champion)"
    },
    "L5_I3": {
@@ -189,12 +181,11 @@
     "episodes": 4,
     "max_submissions": 20,
     "budget_per_agent": 20,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": {
      "I3": "decision"
     },
-    "seed_visible": 0.121426,
-    "seed_hidden": 0.090996,
+    "seed_visible": -0.00065,
     "seed_note": "placeholder seed (real seed = previous stage's champion)"
    }
   },
@@ -209,14 +200,13 @@
     "episodes": 12,
     "max_submissions": 60,
     "budget_per_agent": 20,
-    "fold_key": "folds_secondary",
+    "fold_key": "F0",
     "roles": {
      "R1": "decision",
      "R2": "decision",
      "R3": "decision"
     },
-    "seed_visible": 0.120659,
-    "seed_hidden": 0.09457,
+    "seed_visible": -0.00065,
     "seed_note": "placeholder seed (real seed = previous stage's champion)"
    }
   },
@@ -236,10 +226,9 @@
     "episodes": 16,
     "max_submissions": 80,
     "budget_per_agent": 10,
-    "fold_key": "folds",
+    "fold_key": "F0",
     "roles": "phase-driven",
-    "seed_visible": 0.05537,
-    "seed_hidden": 0.041494,
+    "seed_visible": -0.000358,
     "seed_note": "placeholder seed (real seed = previous stage's champion)"
    }
   }
@@ -279,9 +268,10 @@
   ]
  ],
  "selection": {
-  "L4": "group A = L4_A; group B = best of L4_B1..3 by (visible desc, hidden desc, id asc); final = higher hidden robust gain, tie -> B",
-  "L5": "R1 -> per (freq,H) cell routing on primary visible folds -> R2 on secondary folds; final = R2 champion",
-  "L7": "final = L7 champion"
+  "L4": "group A = L4_A; group B = best of L4_B1..3 by (F0 desc, id asc); stage seed = higher F0, tie -> B",
+  "L5": "R1 -> per (freq,H) cell routing on F0 -> R2 on F0; stage seed = R2 champion",
+  "L7": "L7 champion",
+  "final": "final_select.py: every frozen stage candidate (+ seed) scored host-side on F1 once; best F1 locked; then F2 scored once"
  },
  "retrieval_seed_coverage": {
   "tasks": 80,
@@ -296,12 +286,12 @@
   }
  },
  "pack": {
-  "receipt_sha256": "6ec7a40aadf54210e1d00b99d99fc8f50ef7a56cd627c577c68824c6403f9bcc",
+  "receipt_sha256": "47acff6b1fe01010c20562e0fd05f152a6464a15165f481fc2aacd672f0419b9",
   "task_count": 80,
   "folds_primary": [
    {
     "n": 27,
-    "role": "visible",
+    "role": "F0_feedback",
     "groups": [
      "Algriculture:h10",
      "Algriculture:h8",
@@ -348,7 +338,7 @@
    },
    {
     "n": 27,
-    "role": "visible",
+    "role": "F1_selection",
     "groups": [
      "Algriculture:h6",
      "Climate:h6",
@@ -395,7 +385,7 @@
    },
    {
     "n": 26,
-    "role": "hidden",
+    "role": "F2_final_test",
     "groups": [
      "Algriculture:h12",
      "Climate:h10",
@@ -440,148 +430,6 @@
     ]
    }
   ],
-  "folds_secondary": [
-   {
-    "n": 27,
-    "role": "visible",
-    "groups": [
-     "Algriculture:h6",
-     "Climate:h10",
-     "Economy:h10",
-     "Economy:h6",
-     "Energy:h12",
-     "Security:h10",
-     "Security:h12",
-     "SocialGood:h10",
-     "SocialGood:h12",
-     "SocialGood:h8",
-     "Traffic:h6",
-     "Traffic:h8"
-    ],
-    "task_ids": [
-     "official_2b829d1d59ace5a062dafc38",
-     "official_5438425649166ed599a3a013",
-     "official_b94e3adb166ed07772429ce6",
-     "official_db68ba4c65afffca42b3641d",
-     "official_75c5d629959f12010f1b0517",
-     "official_73a6300a4f1b74b17dd47e97",
-     "official_abb25b9daa8e4a538b5a2059",
-     "official_88a79d8c7e20b06eda941562",
-     "official_250263125230b94cb1d0cf35",
-     "official_854b75b080fbd67126b8b7ee",
-     "official_0c993d94ddd0b11c98b7b187",
-     "official_13a284156091d03993f114c1",
-     "official_48f30370965aae06f63e6026",
-     "official_9bd36d68a793b3975903908f",
-     "official_087401c859b72fe76838092f",
-     "official_8b56ae35c5015dc115214525",
-     "official_c2d5957f58ccbf306d769b26",
-     "official_4e78f888a479afb54de58a6e",
-     "official_b5e1d49c0edca1f89107d3d0",
-     "official_c50c98839133e1e3b2aa5e65",
-     "official_bd3f327c35c312e9bc84f31d",
-     "official_30a820a86ad3f18415c655c2",
-     "official_856cdb5ea409b62c455ad41a",
-     "official_3ea621be711cf97cf9819297",
-     "official_b4dd4c61d5d828d2b5e88cbb",
-     "official_842ba996601ae4efad8cf058",
-     "official_2ee8b0bc82838e90f355f563"
-    ]
-   },
-   {
-    "n": 27,
-    "role": "visible",
-    "groups": [
-     "Algriculture:h10",
-     "Algriculture:h12",
-     "Climate:h8",
-     "Energy:h48",
-     "Environment:h192",
-     "Environment:h96",
-     "Public_Health:h12",
-     "Public_Health:h24",
-     "Public_Health:h36",
-     "Public_Health:h48",
-     "Security:h6",
-     "Traffic:h12"
-    ],
-    "task_ids": [
-     "official_3be5851928e2c3fff59553e4",
-     "official_385aca5e63a9578ab58530bc",
-     "official_1eb3d14ff6f3a3f3c563eefc",
-     "official_67cd183e94b45cc0976cd751",
-     "official_a3fb76d5fc102991855d8931",
-     "official_a6f881acfee5fb105ba39ecc",
-     "official_d116072ea45007e3a26c79eb",
-     "official_33281e7099fc645b0d5924c5",
-     "official_c94d98d17f2ff4656776e112",
-     "official_d0312247997b48f3b2f51359",
-     "official_ce5061c82cccd3758abce90b",
-     "official_6012f59ad30f4c470195ea9f",
-     "official_08a8de7ae41c5361610c5438",
-     "official_676b70a8d7b41c1d1a55db30",
-     "official_77289181c8882938645b3947",
-     "official_15854dc5081ce3c5c92271a3",
-     "official_7b041221e46c125243f4e2d5",
-     "official_d03bd7e4af63e14aa0e77399",
-     "official_c99f9507b17afacda7f240cf",
-     "official_ecbede27bbd6937d84bf5911",
-     "official_6db66be18af93ec973663a97",
-     "official_70b58a9f640e281e7f8d8645",
-     "official_f2fecc55f4dc89b07d216252",
-     "official_f4e734fac61069f45c89ab9f",
-     "official_853dbd8f910c297a30fe2288",
-     "official_a1cfd8178280ea4bfd460fd3",
-     "official_01fb0ecbed0ee3a69a47ffad"
-    ]
-   },
-   {
-    "n": 26,
-    "role": "hidden",
-    "groups": [
-     "Algriculture:h8",
-     "Climate:h12",
-     "Climate:h6",
-     "Economy:h12",
-     "Economy:h8",
-     "Energy:h24",
-     "Energy:h36",
-     "Environment:h336",
-     "Environment:h48",
-     "Security:h8",
-     "SocialGood:h6",
-     "Traffic:h10"
-    ],
-    "task_ids": [
-     "official_e950a60e721c2a815cfeda85",
-     "official_f39b4126dce276529ab72f87",
-     "official_a42e235394e358583ccae4aa",
-     "official_f59ef5a1764875ba89951a5e",
-     "official_a3d433c431937d602b41291a",
-     "official_1a64f1bb70f1f679033e1deb",
-     "official_1e119710813f44bd285478dc",
-     "official_8137250fc19beae796c8b73f",
-     "official_4ff59f1950bd96e003ec91b1",
-     "official_59a314042db99fdf1d99ea05",
-     "official_98d7bb2caa7723af81e711c0",
-     "official_f9eb5e971460072f0fe6b486",
-     "official_8ef0e224681f151b9e23c501",
-     "official_7de282a8908d1031cef67790",
-     "official_f49a8d46efa986463de992a4",
-     "official_637f0327ee347fe0f2919168",
-     "official_084a683402590afa44b06c25",
-     "official_47568cddc2699c2791dfef01",
-     "official_64403d523544455633eebdb9",
-     "official_0baab1dc9af18901c8fcb75d",
-     "official_79fb1ae61bcafa8f9aa8aaff",
-     "official_910096567e0e35ae7d22e8c4",
-     "official_02db011db8d42afbca39715d",
-     "official_5f82d12d0cd6ccdfcf446576",
-     "official_06c8aef8a8856591f37ee311",
-     "official_1742afdbf0233c4b086b70f9"
-    ]
-   }
-  ],
   "anchor_coverage": {
    "chronos_bolt": "80/80",
    "combined_chronos_damped_trend": "80/80",
@@ -608,27 +456,30 @@
    "task_index": "13634add65b8cba38177a51094c1bbd89ee0d71762e969b014a6621cd926ca6a"
   },
   "output_sha256": {
-   "shared/views_train.json": "e7767b65fd1aaf1677f97abcfc98b568df3d73dd3469fa1b3bb90427413560e6",
-   "private/eval_data.json": "60103442c29cf538d59d1a306b7013ef6007d78c54ab63eb0488e4e3b517f038"
+   "shared/views_train.json": "4517c447e48640cd1ffa46400014e29b9af105cfce2236b6fff2c17ca84aa2ee",
+   "private/eval_F0_feedback.json": "f2d08c4134bd388ed4cd487afb91170adcbfc8366303607e7218f7c21b8a2d95",
+   "private/eval_F1_selection.json": "5f616052b412a09bd0c433c5f8562be981d01ae7b3ebd8b54a9305400723b7d1",
+   "private/eval_F2_final_test.json": "b3887daf1a19a9796e57ee863f79767542a0ff8da7920b96b554da650b5e73e2"
   },
   "uses_test_ids_or_labels": false,
   "uses_external_dev": false
  },
  "code_sha256": {
-  "build_pack.py": "83fb001e1380d9b0fc5245d37f3855936b5d4b05c0e63d5af311a7f1e57fc65c",
-  "evald.py": "847ec9d06ad7bc1c1097dfbd0d36d6ba7e71618811cb9c50bdb40c28088c7fda",
-  "orchestrate.py": "5eb4870c791b93126c28df50245fdd306232e323b82592d39f60e9530595d354",
+  "build_pack.py": "725f31eed66518394b3553235f4973bdd29c743d855763c1b65885c62082a343",
+  "evald.py": "55d4059de6eceaa41bf4fff62b80e9ae7beeb2f11f8c083a60cf2d3ccde86211",
+  "final_select.py": "a9121c5bdb4131796f65c0bbfdcaf0a6472d9af7b1ca3f961b6de27fbde97ecc",
+  "orchestrate.py": "ae117a4aa3f968e7399894bb47ba87e0c4e67a57ef9e7e608b9f73cc2bb4a5eb",
   "pipeline_runner.py": "1b57c5f5038e7cff249b21a0beda5df3178c4dd3bedfe68e606aa73f63252f75",
   "rounds.py": "3d644aa8c1cde2bddc5304a9d9d36d9bb1a6d8ddde3623fad10a9ee965225c22",
   "run_agent.py": "7719090b4f8fc0ab0a41d25b37ac160fe1139e58d5b7a6215c60c17ec3450b0d",
-  "sandbox_codex.py": "4a170734a7cfe22d8ea0379d81d3bcc45a544daf186bf6f322904a2f80ca4825",
+  "sandbox_codex.py": "f079772d346fce9c4bc4dc98c1636fa46d916e33e9da0bf40b41bddd7f786afd",
   "sol56_codex_shim.py": "0ba8d86943e9118d861e920a7d8f97b18d886b16b763666907482a47da3d563c",
-  "submit.py": "58ffffe458a5efc3342ec3fa55ebf477c14ad24697cbea3d867850daf89fe80b",
+  "submit.py": "430a35c7bb6b5f069cbd5dc01e610ef4bfd86307b4b5e5d0aa1c6f727b654867",
   "sync_round.py": "46d2b791d2b687644fadbad19ba7df0fe5e296ae3c3c7402f11089072f352da3",
   "seeds/seed_adjust.py": "13f82eb5cae9abd4f886c3a266687266cf796eab1e6dcc0426b5448bd5a24d24",
   "seeds/seed_forecast.py": "2216d5f1083994e4ac26dada64164b4743c5ae51f57525da94d92c1c530251ca",
   "seeds/seed_retrieve.py": "d4970de1259fab09785e2459d54ed0ba72d954722234252b5a10f8d747062627",
-  "prompts/TASK_TEMPLATE.md": "b996cc166804c8db4148f45ab0a6c893d8152d85c35c7398a0a6ffee0dff907b"
+  "prompts/TASK_TEMPLATE.md": "7590b749ed80613bdfd7bdda2ba9f816999f7e5355e46b61d1dd543eb498a6c1"
  },
  "llm_calls": 0
 }

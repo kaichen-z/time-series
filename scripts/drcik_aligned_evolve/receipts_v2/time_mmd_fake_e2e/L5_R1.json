@@ -3,42 +3,37 @@
  "runs": {
   "L5_S": {
    "submissions": 8,
-   "best_visible": 0.14097367508646605,
-   "best_hidden": 0.10284859072347233,
+   "best_F0": 0.010322705506925184,
    "used": {
     "S1": 8
    }
   },
   "L5_C": {
    "submissions": 24,
-   "best_visible": 0.14097367508646605,
-   "best_hidden": 0.10284859072347233,
+   "best_F0": 0.010322705506925184,
    "used": {
-    "C1": 8,
+    "C2": 8,
     "C3": 8,
-    "C2": 8
+    "C1": 8
    }
   },
   "L5_I1": {
    "submissions": 8,
-   "best_visible": 0.14097367508646605,
-   "best_hidden": 0.10284859072347233,
+   "best_F0": 0.010322705506925184,
    "used": {
     "I1": 8
    }
   },
   "L5_I2": {
    "submissions": 8,
-   "best_visible": 0.14097367508646605,
-   "best_hidden": 0.10284859072347233,
+   "best_F0": 0.010322705506925184,
    "used": {
     "I2": 8
    }
   },
   "L5_I3": {
    "submissions": 8,
-   "best_visible": 0.14097367508646605,
-   "best_hidden": 0.10284859072347233,
+   "best_F0": 0.010322705506925184,
    "used": {
     "I3": 8
    }
@@ -52,11 +47,7 @@
  "routing": {
   "route": {
    "daily|H192": "L5_S",
-   "daily|H336": "L5_S",
-   "daily|H48": "L5_S",
-   "daily|H96": "L5_S",
    "monthly|H10": "L5_S",
-   "monthly|H12": "L5_S",
    "monthly|H6": "L5_S",
    "monthly|H8": "L5_S",
    "weekly|H12": "L5_S",
@@ -66,6 +57,6 @@
   },
   "default": "L5_S"
  },
- "routed_sha256": "421572f096510fb413d560a6bf188d16c242e49a5798a8253df55852dbaccd96",
+ "routed_sha256": "886ca7fbd76933b03b5e89ff95f81054144c4582f12b534a13d09e8f599639ed",
  "stop": null
 }

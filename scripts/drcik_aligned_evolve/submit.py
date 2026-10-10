@@ -15,8 +15,7 @@ while not res.exists():
     time.sleep(3)
 time.sleep(0.5); r = json.load(open(res))
 if "error" in r: print("ERROR:", r["error"]); sys.exit(1)
-w = sorted(r["visible_per_task"].items(), key=lambda x: x[1])
-print(json.dumps(dict(eligible=r.get("eligible", r["accepted"]), round=r.get("round"), hidden_check=r["hidden_check"],
-                      visible_fitness=round(r["visible_fitness"], 5), visible_folds=[round(x, 5) for x in r["visible_folds"]],
-                      better=r["visible_better"], worse=r["visible_worse"], runtime_errors=r["n_runtime_errors"],
-                      budget_left=r["budget_left"], worst5=w[:5], best5=w[-5:], full_result=str(res))))
+print(json.dumps(dict(eligible=r.get("eligible", r["accepted"]), round=r.get("round"),
+                      feedback_fitness=r["visible_fitness"],
+                      better=r["visible_better"], worse=r["visible_worse"], runtime_errors=r["n_runtime_errors"], runtime_error_kinds=r["runtime_error_kinds"],
+                      budget_left=r["budget_left"])))

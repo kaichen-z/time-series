@@ -3,11 +3,10 @@
  "runs": {
   "L5_R2": {
    "submissions": 24,
-   "best_visible": 0.1387029296344204,
-   "best_hidden": 0.1184253455300385,
+   "best_F0": 0.010322705506925184,
    "used": {
-    "R3": 8,
     "R1": 8,
+    "R3": 8,
     "R2": 8
    }
   }
@@ -19,9 +18,9 @@
  "net_tokens": 34000,
  "final": "L5_R2",
  "modules_sha256": {
-  "numerical": "e6b40e2b3f2bf88867e60b9ef86eaaff7815a375ab206bbf01e4ca2d4fa18ffe",
+  "numerical": "d418d87d117ca0fad4236fa2953d99d6d0982e32b1cf815069457f3c503f2220",
   "retrieval": "d4970de1259fab09785e2459d54ed0ba72d954722234252b5a10f8d747062627",
-  "decision": "993b5e9dc4d5025aea6def1974c282d035a762d27ca072c5848a783351e73fec"
+  "decision": "886ca7fbd76933b03b5e89ff95f81054144c4582f12b534a13d09e8f599639ed"
  },
  "stop": null
 }

@@ -1,4 +1,16 @@
-# Dr-CiK-budget-aligned evolution for official TimesX / Time-MMD
+# Dr-CiK-budget-aligned evolution for official TimesX / Time-MMD (protocol v2, anti-overfit)
+
+**v2 (2026-10-10), after the first full run memorised visible answers (archived as INVALID_OVERFIT):**
+- each pack's 80 Train tasks = F0 feedback / F1 selection / F2 final test (whole-group, disjoint);
+- run dirs contain ONLY F0 (views + truth); agents get fixed-precision aggregates only (no per-task truth, errors,
+  ids, rankings, hidden pass/fail); series/group identity removed from views;
+- submissions rejected for size > 20 KB, > 300 numeric constants / > 3000 digit chars, > 2000 string chars,
+  banned modules/builtins (encoders, compression, hashing, file/OS, exec/eval), series/group names in strings, or
+  near-exact reproduction of >= max(3, 10%) F0 tasks (base or final forecast);
+- per-round acceptance on F0 only; after ALL stages are frozen `final_select.py` scores every candidate (+ seed) on F1
+  once, locks the best, then scores F2 once (`final/access_log.json`: F1 = 1, F2 = 1 after lock);
+- deviation from Dr-CiK v3.3.2: no visible/hidden 2+1 folds during evolution and no L5-R2 secondary re-split (both
+  would expose selection/test groups); budgets/stages/episodes unchanged.
 
 This package transfers the **stage / episode / submission / acceptance budget** of the Dr-CiK pipeline
 (runsheet v3.3.2: L4 + L5 + L7, `gpt-5.6-sol`, reasoning effort high) to a new three-module implementation
