@@ -5,10 +5,10 @@ Agents submit ONE module (role numerical -> forecast.py, retrieval -> retrieve.p
 two modules are the run's current shared best. Which role an agent may submit is fixed in RUN/stage.json
 ("roles": {agent_id: role}) or, for phased runs (L7), by RUN/shared/phase.json.
 
-Score (Dr-CiK v3.3.2): per task gain = (Toto joint error - final joint error) / (mean Toto joint error), joint error =
-sMAE + sRMSE each capped at 5; fold robust gain = mean + 0.5 * mean(negative part); visible fitness = mean over the two
+Score (Dr-CiK v3.3.2, per stage, see SCALE below): per task gain = Toto joint error - final joint error (L4/L5) or the
+same divided by the mean Toto joint error (L7), joint error = sMAE + sRMSE each capped at 5; fold robust gain = mean + 0.5 * mean(negative part); visible fitness = mean over the two
 visible folds - 0.25 * std; hidden = robust gain on the hidden fold. Synchronous rounds (SYNC_ROUNDS=1, sync_round.py):
-eligible iff visible > frozen round base + eps AND hidden >= frozen round base hidden - 1e-9; winner at round close.
+eligible iff visible > frozen round base + eps AND hidden >= frozen round base hidden - tol (stage values); winner at round close.
 Hidden per-task numbers never leave private/. usage: evald.py <run_dir> <budget_per_agent>"""
 import json, math, os, shutil, statistics, subprocess, sys, time, traceback
 from pathlib import Path
@@ -17,8 +17,11 @@ HERE = Path(__file__).resolve().parent; sys.path.insert(0, str(HERE)); import sy
 RUN = Path(sys.argv[1]).resolve(); BUDGET = int(sys.argv[2])
 STAGE = json.load(open(RUN / "stage.json")); ED = json.load(open(RUN / "private/eval_data.json"))
 FOLDS = ED[STAGE.get("fold_key", "folds")]; VIS, HID = FOLDS[0] + FOLDS[1], FOLDS[2]
-TRUTH, BJT = ED["truth"], ED["base_jt"]; SCALE = sum(BJT[t] for t in FOLDS[0] + FOLDS[1] + FOLDS[2]) / sum(map(len, FOLDS))
-PEN, STD_W, EPS = 0.5, 0.25, STAGE.get("eps", 1e-4)
+TRUTH, BJT = ED["truth"], ED["base_jt"]
+# v3.3.2 per-stage formulas: L4 coevolution/evald.py and L5 meta_harness/hevald.py use gain = BJT - jt (no scale), visible
+# eps 1e-4, hidden tolerance 1e-9; L7 coevo_x/hevald_x.py divides by the dataset's mean Toto joint error, eps 1e-5, tol 1e-6.
+SCALE = (sum(BJT[t] for t in FOLDS[0] + FOLDS[1] + FOLDS[2]) / sum(map(len, FOLDS))) if STAGE["scaled_gain"] else 1.0
+PEN, STD_W, EPS, HTOL = 0.5, 0.25, STAGE["eps"], STAGE["hidden_tol"]
 MOD = {"numerical": "forecast", "retrieval": "retrieve", "decision": "adjust"}
 SYNC = os.environ.get("SYNC_ROUNDS") == "1"
 
@@ -87,7 +90,7 @@ def main():
             mods = {r: best(r) for r in MOD}; mods[role] = cp
             pub, hid = score(mods)
             ref_h = st["base_hidden"] if SYNC else st["best_hidden"]; ref_v = st["base_visible"] if SYNC else st["best_visible"]
-            hid_ok = hid >= ref_h - 1e-9; elig = pub["visible_fitness"] > ref_v + EPS and hid_ok
+            hid_ok = hid >= ref_h - HTOL; elig = pub["visible_fitness"] > ref_v + EPS and hid_ok
             if SYNC:
                 idx = SR.next_index(st, agent); SR.record(st, agent, idx, pub["visible_fitness"], hid, elig, f"shared/{role}/{cp.name}")
                 acc = False; out.update(eligible=elig, round=st["round"])

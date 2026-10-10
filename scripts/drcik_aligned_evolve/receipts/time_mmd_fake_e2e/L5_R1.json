@@ -1,0 +1,71 @@
+{
+ "stage": "L5_R1",
+ "runs": {
+  "L5_S": {
+   "submissions": 8,
+   "best_visible": 0.14097367508646605,
+   "best_hidden": 0.10284859072347233,
+   "used": {
+    "S1": 8
+   }
+  },
+  "L5_C": {
+   "submissions": 24,
+   "best_visible": 0.14097367508646605,
+   "best_hidden": 0.10284859072347233,
+   "used": {
+    "C1": 8,
+    "C3": 8,
+    "C2": 8
+   }
+  },
+  "L5_I1": {
+   "submissions": 8,
+   "best_visible": 0.14097367508646605,
+   "best_hidden": 0.10284859072347233,
+   "used": {
+    "I1": 8
+   }
+  },
+  "L5_I2": {
+   "submissions": 8,
+   "best_visible": 0.14097367508646605,
+   "best_hidden": 0.10284859072347233,
+   "used": {
+    "I2": 8
+   }
+  },
+  "L5_I3": {
+   "submissions": 8,
+   "best_visible": 0.14097367508646605,
+   "best_hidden": 0.10284859072347233,
+   "used": {
+    "I3": 8
+   }
+  }
+ },
+ "episodes_accounted": 28,
+ "failed_episodes": 0,
+ "refused": 0,
+ "overshoot_units": 0,
+ "net_tokens": 23800,
+ "routing": {
+  "route": {
+   "daily|H192": "L5_S",
+   "daily|H336": "L5_S",
+   "daily|H48": "L5_S",
+   "daily|H96": "L5_S",
+   "monthly|H10": "L5_S",
+   "monthly|H12": "L5_S",
+   "monthly|H6": "L5_S",
+   "monthly|H8": "L5_S",
+   "weekly|H12": "L5_S",
+   "weekly|H24": "L5_S",
+   "weekly|H36": "L5_S",
+   "weekly|H48": "L5_S"
+  },
+  "default": "L5_S"
+ },
+ "routed_sha256": "421572f096510fb413d560a6bf188d16c242e49a5798a8253df55852dbaccd96",
+ "stop": null
+}

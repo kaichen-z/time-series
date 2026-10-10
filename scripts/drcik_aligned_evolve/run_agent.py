@@ -34,7 +34,7 @@ prompt = (TASK + f"\n\n## This episode\nYou are agent `{AID}`. Episode {EPI}/{EP
 env = dict(os.environ, RUN_DIR=str(RUN), AGENT_ID=AID); t0 = time.time()
 with open(WS / f"episode{EPI}.log", "w") as lf:
     try:
-        subprocess.run(["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--add-dir", str(RUN),
+        subprocess.run(["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--add-dir", str(RUN / "shared"), "--add-dir", str(RUN / "queue"),
                         "-m", MODEL, "-c", f'model_reasoning_effort="{EFFORT}"', "-C", str(WS), "-o", str(WS / f"episode{EPI}_final.md"), "-"],
                        input=prompt, text=True, env=env, stdout=lf, stderr=subprocess.STDOUT, timeout=7200)
     except subprocess.TimeoutExpired:

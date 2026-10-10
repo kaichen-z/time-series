@@ -5,8 +5,8 @@ best module through submit.py, exercising daemon / rounds / acceptance / routing
 import json, os, re, subprocess, sys
 from pathlib import Path
 prompt = sys.stdin.read(); run = Path(os.environ["RUN_DIR"]); aid = os.environ["AGENT_ID"]
-st = json.load(open(run / "stage.json"))
-role = st.get("roles", {}).get(aid) or re.findall(r"submit with `--role (\w+)`", prompt)[-1]
+rf = run / "shared/roles.json"
+role = (json.load(open(rf)).get(aid) if rf.exists() else None) or re.findall(r"submit with `--role (\w+)`", prompt)[-1]
 mod = {"numerical": "forecast", "retrieval": "retrieve", "decision": "adjust"}[role]
 src = (run / f"shared/best_{mod}.py").read_text(); ws = Path(os.getcwd()) if "-C" not in sys.argv else Path(sys.argv[sys.argv.index("-C") + 1])
 ep = int(re.search(r"Episode (\d+)/", prompt).group(1))
@@ -19,7 +19,7 @@ for k in range(2):
     else:
         code = src + f"\n_a0 = adjust\ndef adjust(view):\n    b = view['base_forecast']\n    return [bb + (a - bb) * {fac} for a, bb in zip(_a0(view), b)]\n"
     p = ws / f"cand_{ep}_{k}.py"; p.write_text(code)
-    r = subprocess.run([sys.executable, os.environ["SUBMIT_PY"], str(p), "--role", role, "--note", "fake"], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, re.search(r"python3 (\S+submit\.py)", prompt).group(1), str(p), "--role", role, "--note", "fake"], capture_output=True, text=True)
     print(r.stdout[-300:], r.stderr[-300:])
 if "-o" in sys.argv: Path(sys.argv[sys.argv.index("-o") + 1]).write_text("fake episode done")
 if "--json" in sys.argv:  # emulate codex --json usage accounting for the sol56 shim test

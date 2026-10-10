@@ -1,0 +1,60 @@
+{
+ "stage": "L5_R1",
+ "runs": {
+  "L5_S": {
+   "submissions": 8,
+   "best_visible": 0.0014537457042946868,
+   "best_hidden": 0.10691185213016173,
+   "used": {
+    "S1": 8
+   }
+  },
+  "L5_C": {
+   "submissions": 24,
+   "best_visible": 0.0014537457042946868,
+   "best_hidden": 0.10691185213016173,
+   "used": {
+    "C1": 8,
+    "C2": 8,
+    "C3": 8
+   }
+  },
+  "L5_I1": {
+   "submissions": 8,
+   "best_visible": 0.0014537457042946868,
+   "best_hidden": 0.10691185213016173,
+   "used": {
+    "I1": 8
+   }
+  },
+  "L5_I2": {
+   "submissions": 8,
+   "best_visible": 0.0014537457042946868,
+   "best_hidden": 0.10691185213016173,
+   "used": {
+    "I2": 8
+   }
+  },
+  "L5_I3": {
+   "submissions": 8,
+   "best_visible": 0.0014537457042946868,
+   "best_hidden": 0.10691185213016173,
+   "used": {
+    "I3": 8
+   }
+  }
+ },
+ "episodes_accounted": 28,
+ "failed_episodes": 0,
+ "refused": 0,
+ "overshoot_units": 0,
+ "net_tokens": 23800,
+ "routing": {
+  "route": {
+   "1D|H12": "L5_S"
+  },
+  "default": "L5_S"
+ },
+ "routed_sha256": "4ff1dd0d52704a95ed0f9728c277d45466be4dab44573df1013af04622a25dda",
+ "stop": null
+}

@@ -21,11 +21,15 @@ from pathlib import Path
 P = argparse.ArgumentParser()
 P.add_argument("--dataset", choices=("timesx", "time_mmd"), required=True)
 P.add_argument("--out", type=Path, required=True)
-P.add_argument("--repo", type=Path, default=Path("/tmp/tsh"), help="time-series repo checkout (official loader + handoff)")
-P.add_argument("--official-root", type=Path, default=Path("/home/yiqi/.slock/agents/d8b953a5-d389-470c-b917-fa9ff0cd715a"),
+P.add_argument("--repo", type=Path, required=True, help="time-series repo checkout (official loader + handoff/official_ts_llm)")
+P.add_argument("--official-root", type=Path, required=True,
                help="directory holding repos/{TimesX-project,MM-TSFlib} and artifacts/official_ts_alignment")
 P.add_argument("--tasks", type=int, default=80)
 A = P.parse_args()
+for need in (A.repo / "evolving_loop/official_benchmark_loader.py", A.repo / "handoff/official_ts_llm/alignment_manifest.json",
+             A.official_root / "artifacts/official_ts_alignment", A.official_root / "repos"):
+    if not need.exists(): raise SystemExit(f"preflight: missing {need}")
+if A.out.exists(): raise SystemExit(f"refusing to overwrite existing pack {A.out}")
 sys.path.insert(0, str(A.repo))
 from evolving_loop.official_benchmark_loader import load_official_timesx, load_official_time_mmd, load_anchor_cache  # noqa: E402
 
