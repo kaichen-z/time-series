@@ -1,0 +1,36 @@
+{
+  "schema": "joint-forecast-controller-lock-v1",
+  "status": "locked",
+  "chosen": "formal_48/round_10/routing/candidate.py",
+  "chosen_sha256": "42eac81054dca98c9b680b80ebc6e951c8f5d8e080fea5fca27c2b306b231bd8",
+  "chosen_size_bytes": 18163,
+  "selection": "best Train objective among candidates passing the declared 20000-byte static limit",
+  "calls": {
+    "pilot": 12,
+    "formal": 48,
+    "total": 60
+  },
+  "static_checks": {
+    "python_compile": true,
+    "max_size_bytes": 20000,
+    "forbidden_pattern_hits": 0
+  },
+  "fail_closed_rollbacks": [
+    {
+      "path": "formal_48/round_15/routing/candidate.py",
+      "sha256": "55c68415764ed8f4db1ad79dd296f56a0d6ab0d9cead3d605df30c1898c6de0d",
+      "size_bytes": 20788,
+      "reason": "exceeds 20000-byte limit"
+    },
+    {
+      "path": "formal_48/round_16/safety/candidate.py",
+      "sha256": "36fa4dc7e321164e9d607db447ba8a9c8ae319fab59080ecf033ac0360049326",
+      "size_bytes": 23051,
+      "reason": "exceeds 20000-byte limit"
+    }
+  ],
+  "train_score": "formal_48/train_static_valid_score.json",
+  "train_score_sha256": "df56bf3ef9685b3d23080f3cd412f47f909ae98ae5a3ae02e789e0bd5ddaca0b",
+  "dev_score": "formal_48/dev_once_score.json",
+  "dev_score_sha256": "63a968b079bad00af9f3906f435e371c8fea3bb3818bf33b8f242a36151dfa80"
+}

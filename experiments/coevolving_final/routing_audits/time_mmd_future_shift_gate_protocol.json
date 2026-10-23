@@ -1,0 +1,42 @@
+{
+  "name": "Time-MMD prospective unlabeled-shift abstention gate v1",
+  "status": "frozen prospective protocol; do not evaluate or retune on already-inspected Train/Dev/Test periods",
+  "frozen_on": "2026-10-20",
+  "motivation_only_not_evidence": {
+    "source_artifact": "time_mmd_prequential_drift_audit.json",
+    "source_sha256": "57ae311b15824bde42fcb282a873ddb9df5bd869c284c2d4896f2b088a9e8f43",
+    "warning": "The metric and threshold were selected after inspecting six Train walk-forward blocks. Their apparent filtering performance is post-hoc and cannot support a claim."
+  },
+  "eligibility": {
+    "requires_event_time": true,
+    "undated_rows": "abstain and exclude from temporal calibration",
+    "minimum_recent_reference_rows": 10000,
+    "reference_window": "most recent 25% of the available dated training history, capped only by data availability"
+  },
+  "shift_statistic": {
+    "name": "maximum absolute standardized feature-mean shift",
+    "formula": "max_j abs(mean(X_future,j)-mean(X_recent,j))/max(std(X_recent,j),1e-8)",
+    "feature_set": "exact frozen numerical gate input vector; no labels, residuals, document text, target values, or future outcomes",
+    "threshold": 0.7080584909347596,
+    "decision": "ABSTAIN from all learned expert routing when statistic > threshold; otherwise apply the frozen recent-window gate"
+  },
+  "frozen_model_policy": {
+    "training_window": "same most recent 25% dated-history window",
+    "threshold_selection": "existing inner-OOF select_threshold implementation, past rows only",
+    "no_frequency_release": true,
+    "no_online_threshold_updates_during_evaluation": true
+  },
+  "evaluation": {
+    "unit": "one genuinely future chronological block not previously inspected",
+    "primary_metrics": ["sMAE", "sRMSE"],
+    "secondary_metrics": ["sCRPS", "coverage", "misrepair_rate"],
+    "success": "both sMAE and sRMSE non-regressing versus the frozen numerical baseline, with at least one strictly positive; report all abstentions",
+    "failure": "either primary metric regresses, or the gate fires on zero rows; no threshold retuning after the block is opened",
+    "controls": [
+      "frozen recent-window gate without shift abstention",
+      "always-abstain numerical baseline",
+      "expanding-window gate"
+    ]
+  },
+  "claim_boundary": "Until the prospective block passes, describe covariate shift only as a diagnostic correlate and safety-gate hypothesis."
+}
